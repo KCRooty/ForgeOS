@@ -78,6 +78,8 @@ pub fn init() {
         IDT[14].set_handler(page_fault as u64, 0);
         IDT[crate::apic::TIMER_VECTOR as usize]
             .set_handler(crate::apic::timer_interrupt_handler as u64, 0);
+        IDT[(crate::pic::PIC1_OFFSET + crate::keyboard::IRQ) as usize]
+            .set_handler(crate::keyboard::keyboard_interrupt_handler as u64, 0);
 
         let ptr = IdtPointer {
             limit: (size_of::<[IdtEntry; 256]>() - 1) as u16,
