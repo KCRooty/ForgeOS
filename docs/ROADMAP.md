@@ -63,6 +63,8 @@ Lo que sí necesita nombre propio:
 Ver [COMPATIBILITY.md](COMPATIBILITY.md) para el análisis completo —
 capa de compatibilidad Linux (Steam, Discord, Spotify, navegadores
 reales) y el estado real del firmware/hardware abierto (coreboot,
-Intel ME, AMD PSP). Resumen: ninguna de las dos cosas está a la vuelta
-de la esquina, y ninguna de las dos las resuelve nadie al 100% hoy —
-Linux y FreeBSD tampoco.
+Intel ME, AMD PSP). Ver [LANGUAGES.md](LANGUAGES.md) para el mismo
+análisis aplicado a lenguajes de programación nativos (Python, C++,
+Rust self-hosted, Java, JavaScript, ffmpeg...). Resumen: nada de esto
+está a la vuelta de la esquina, y nadie lo tiene resuelto al 100% hoy —
+ni Linux, ni FreeBSD, ni nadie.
