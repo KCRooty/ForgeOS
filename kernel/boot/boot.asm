@@ -40,7 +40,11 @@ section .boot.bss
 align 4096
 p4_table:    resb 4096
 p3_table:    resb 4096
-p2_table:    resb 4096
+; 4 tablas P2 contiguas — cada una cubre 1 GiB (512 huge pages de 2 MiB),
+; así que las 4 juntas identity-mapean 0-4 GiB. Necesario para llegar al
+; Local APIC (~0xFEE00000) y al I/O APIC (~0xFEC00000), que viven por
+; encima del primer GiB que teníamos mapeado hasta ahora.
+p2_tables:   resb 4096 * 4
 stack_bottom: resb 16384
 stack_top:
 
@@ -107,19 +111,40 @@ setup_page_tables:
     mov eax, p3_table
     or eax, 0b11
     mov [p4_table], eax
-    ; P3[0] -> P2
-    mov eax, p2_table
+
+    ; P3[0..3] -> cada una de las 4 tablas P2 (identity-map 0-4 GiB)
+    mov eax, p2_tables
     or eax, 0b11
-    mov [p3_table], eax
-    ; P2: 512 entradas de páginas de 2 MiB -> identity map primeros 1 GiB
+    mov [p3_table + 0*8], eax
+
+    mov eax, p2_tables
+    add eax, 4096
+    or eax, 0b11
+    mov [p3_table + 1*8], eax
+
+    mov eax, p2_tables
+    add eax, 4096*2
+    or eax, 0b11
+    mov [p3_table + 2*8], eax
+
+    mov eax, p2_tables
+    add eax, 4096*3
+    or eax, 0b11
+    mov [p3_table + 3*8], eax
+
+    ; Rellenamos las 4 tablas P2 seguidas como si fueran un array de 2048
+    ; entradas de 2 MiB cada una -> identity-map completo 0-4 GiB.
     mov ecx, 0
 .map_p2:
     mov eax, 0x200000
-    mul ecx
+    mul ecx                 ; edx:eax = ecx * 0x200000 (dirección física)
     or eax, 0b10000011      ; present + writable + huge page
-    mov [p2_table + ecx * 8], eax
+    mov ebx, ecx
+    shl ebx, 3               ; ebx = ecx*8 (offset en bytes dentro de p2_tables)
+    add ebx, p2_tables
+    mov [ebx], eax
     inc ecx
-    cmp ecx, 512
+    cmp ecx, 2048
     jne .map_p2
     ret
 
