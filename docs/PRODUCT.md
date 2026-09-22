@@ -39,7 +39,7 @@ como Fedora Workstation/Server/Silverblue desde una sola base:
 | **Gaming** | Scheduler de baja latencia, drivers GPU al día (fase HAL ya planeada), servicios de fondo reducidos al mínimo durante sesión activa |
 | **Server** | Sin GUI por defecto, red hardening extra, prioridad a throughput/uptime sobre latencia interactiva |
 | **Ofimática** | Apps de escritorio + estabilidad ante todo, GUI completa, nada exótico |
-| **Hardened** (el "cyberseguridad" original, redefinido) | Capability gating más estricto por defecto, logging de auditoría activo, superficie de ataque reducida a propósito — sigue siendo uso normal, solo que paranoico |
+| **Hardened** (el "cyberseguridad" original, redefinido) | Capability gating más estricto por defecto (incluyendo Capsicum-style, por fd — ver `PHILOSOPHY.md`), aislamiento de procesos tipo *jails* de FreeBSD para apps no confiables, logging de auditoría activo, superficie de ataque reducida a propósito — sigue siendo uso normal, solo que paranoico |
 
 El "trabajar de todo" no es una promesa de que un solo build hace
 perfectamente las cuatro cosas a la vez — es que el mismo núcleo seguro y

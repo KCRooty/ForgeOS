@@ -52,11 +52,16 @@ Lo que sí necesita nombre propio:
   requiere autenticación interactiva, y el kernel lo audita. Nombre
   provisional: `elevate <comando>`.
 - **Gestor de paquetes**: nombre provisional `forge get <paquete>` /
-  `forge rm <paquete>` — corto, memorable, ligado a la marca. Decidir si
-  compila desde fuente (como `xbm` de nyxos-dev, más "fiel al metal" pero
-  necesita nuestro propio compilador corriendo dentro del OS — proyecto
-  grande aparte) o si empieza más simple con binarios precompilados y se
-  añade compilación desde fuente más adelante.
+  `forge rm <paquete>` — corto, memorable, ligado a la marca. **Decidido
+  vía el modelo de FreeBSD (ports + pkg):** una colección de recetas que
+  compilan desde fuente con nuestro propio `cc` (equivalente a "ports"),
+  más binarios precompilados generados a partir de esas mismas recetas
+  para instalación rápida (equivalente a "pkg"). No hace falta elegir
+  entre "compila siempre" o "solo binarios" — FreeBSD ya demostró que
+  las dos cosas conviven desde la misma fuente de verdad. Verificación
+  de paquetes vía firma **signify**-style (OpenBSD) — verifica autoría
+  real, no solo que el binario no se ha tocado (que es lo único que da
+  un hash SHA-256 suelto).
 
 ## Fuera de alcance (por ahora)
 
