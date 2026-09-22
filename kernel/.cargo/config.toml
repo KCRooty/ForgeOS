@@ -1,0 +1,9 @@
+[unstable]
+build-std = ["core", "alloc", "compiler_builtins"]
+build-std-features = ["compiler-builtins-mem"]
+
+[build]
+target = "../targets/x86_64-forge.json"
+
+[target.'cfg(target_os = "none")']
+runner = "bash ../tools/run-qemu.sh"

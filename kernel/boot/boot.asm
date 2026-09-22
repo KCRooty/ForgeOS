@@ -1,0 +1,160 @@
+; boot.asm — Forge OS boot trampoline
+; GRUB (Multiboot2) nos entrega en modo protegido de 32 bits.
+; Aquí montamos paginación temporal identity-map de los primeros 2 GiB,
+; activamos PAE + long mode, y saltamos a Rust en 64 bits.
+;
+; Patrón estándar osdev — mismo que usan nyxos-dev/nyx-os y Asmodeus14/Nyx
+; en su respectivo stub de arranque.
+
+bits 32
+
+section .multiboot2
+align 8
+mb2_header_start:
+    dd 0xE85250D6                ; magic Multiboot2
+    dd 0                         ; arquitectura: i386 protected mode
+    dd mb2_header_end - mb2_header_start
+    dd -(0xE85250D6 + 0 + (mb2_header_end - mb2_header_start))
+    ; tag final
+    dw 0
+    dw 0
+    dd 8
+mb2_header_end:
+
+section .boot.bss
+align 4096
+p4_table:    resb 4096
+p3_table:    resb 4096
+p2_table:    resb 4096
+stack_bottom: resb 16384
+stack_top:
+
+section .boot.text
+global _start
+extern kernel_main_upper   ; símbolo Rust: fn kernel_main_upper(mb2_ptr: u64) -> !
+
+_start:
+    mov esp, stack_top
+    mov edi, ebx            ; puntero a la info Multiboot2 (arg del kernel)
+
+    call check_multiboot
+    call check_cpuid
+    call check_long_mode
+
+    call setup_page_tables
+    call enable_paging
+
+    lgdt [gdt64.pointer]
+    jmp gdt64.code:long_mode_start
+
+check_multiboot:
+    cmp eax, 0x36d76289
+    jne .no_mb
+    ret
+.no_mb:
+    mov al, "0"
+    jmp error
+
+check_cpuid:
+    pushfd
+    pop eax
+    mov ecx, eax
+    xor eax, 1 << 21
+    push eax
+    popfd
+    pushfd
+    pop eax
+    push ecx
+    popfd
+    cmp eax, ecx
+    je .no_cpuid
+    ret
+.no_cpuid:
+    mov al, "1"
+    jmp error
+
+check_long_mode:
+    mov eax, 0x80000000
+    cpuid
+    cmp eax, 0x80000001
+    jb .no_lm
+    mov eax, 0x80000001
+    cpuid
+    test edx, 1 << 29
+    jz .no_lm
+    ret
+.no_lm:
+    mov al, "2"
+    jmp error
+
+setup_page_tables:
+    ; P4[0] -> P3
+    mov eax, p3_table
+    or eax, 0b11
+    mov [p4_table], eax
+    ; P3[0] -> P2
+    mov eax, p2_table
+    or eax, 0b11
+    mov [p3_table], eax
+    ; P2: 512 entradas de páginas de 2 MiB -> identity map primeros 1 GiB
+    mov ecx, 0
+.map_p2:
+    mov eax, 0x200000
+    mul ecx
+    or eax, 0b10000011      ; present + writable + huge page
+    mov [p2_table + ecx * 8], eax
+    inc ecx
+    cmp ecx, 512
+    jne .map_p2
+    ret
+
+enable_paging:
+    mov eax, p4_table
+    mov cr3, eax
+
+    mov eax, cr4
+    or eax, 1 << 5           ; PAE
+    mov cr4, eax
+
+    mov ecx, 0xC0000080      ; EFER MSR
+    rdmsr
+    or eax, 1 << 8           ; LME
+    wrmsr
+
+    mov eax, cr0
+    or eax, 1 << 31          ; PG
+    mov cr0, eax
+    ret
+
+error:
+    mov dword [0xb8000], 0x4f524f45  ; "ER" rojo sobre negro en VGA text
+    mov dword [0xb8004], 0x4f3a4f52  ; "R:"
+    mov byte  [0xb8008], al
+    hlt
+
+section .boot.data
+align 8
+gdt64:
+    dq 0
+.code: equ $ - gdt64
+    dq (1<<43) | (1<<44) | (1<<47) | (1<<53) ; código 64-bit, ring0
+.pointer:
+    dw $ - gdt64 - 1
+    dq gdt64
+
+bits 64
+section .text
+long_mode_start:
+    mov ax, 0
+    mov ss, ax
+    mov ds, ax
+    mov es, ax
+    mov fs, ax
+    mov gs, ax
+
+    mov rsp, stack_top
+    ; edi ya trae el puntero Multiboot2 (calling convention System V: rdi = arg1)
+    call kernel_main_upper
+.hang:
+    hlt
+    jmp .hang
