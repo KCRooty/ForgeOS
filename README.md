@@ -6,9 +6,13 @@ Kernel monolítico x86_64 en Rust, bare-metal, con filosofía híbrida:
 - **Windows NT**: HAL — capa de abstracción de hardware; el código de vendor (GPU, red, etc)
   vive detrás de traits, nunca hardcodeado en el core del kernel
 
-Bajo el paraguas de Static Forge.
+Bajo el paraguas de Static Forge. **Licencia: GPL-2.0+.**
 
-## Estado: M0 — boot a "hola kernel" por serie (en construcción)
+Ver [docs/PHILOSOPHY.md](docs/PHILOSOPHY.md) (diseño técnico) y
+[docs/PRODUCT.md](docs/PRODUCT.md) (a quién sirve y por qué) para el
+razonamiento completo detrás de cada decisión.
+
+## Estado: M1 — capability gating implementado, GDT/IDT pendiente (en construcción)
 
 ## Referencias de arquitectura estudiadas
 - Asmodeus14/Nyx (Rust, QCLang, motor 3D Gen9.5 hand-rolled)
