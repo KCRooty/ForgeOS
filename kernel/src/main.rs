@@ -4,8 +4,11 @@
 
 #![no_std]
 #![no_main]
+#![feature(abi_x86_interrupt)]
 
 mod caps;
+mod gdt;
+mod idt;
 mod serial;
 
 use core::panic::PanicInfo;
@@ -24,6 +27,17 @@ pub extern "C" fn kernel_main_upper(mb2_info_ptr: u64) -> ! {
     serial_println!("Forge OS — M0 boot OK");
     serial_println!("Multiboot2 info @ 0x{:x}", mb2_info_ptr);
     serial_println!("Ring 0, Long Mode, paginación identity-map activa.");
+
+    // M1b — GDT/TSS propia + IDT con manejadores de excepción.
+    gdt::init();
+    serial_println!("[gdt] cargada, TSS con pila IST para double fault");
+    idt::init();
+
+    // Prueba end-to-end: disparamos un breakpoint por software (#BP) y
+    // comprobamos que el handler se ejecuta y la CPU sigue viva después.
+    // Si esto imprime la línea siguiente, el IDT funciona de verdad.
+    unsafe { core::arch::asm!("int3") };
+    serial_println!("[idt] tras int3: seguimos vivos — el IDT funciona");
 
     // M1 — demo del modelo de capabilities. Todavía no hay tabla de
     // procesos (eso es M4), así que probamos el mecanismo con un único
@@ -57,7 +71,7 @@ pub extern "C" fn kernel_main_upper(mb2_info_ptr: u64) -> ! {
         Err(_) => serial_println!("[caps] ampliar pledge -> denegado (correcto, es irreversible)"),
     }
 
-    // TODO M1b: GDT/TSS propias, IDT + excepciones, PIC/APIC
+    // TODO M1c: PIC 8259 remapeado (evitar colisión IRQ vs excepciones CPU)
     // TODO M2: allocador físico, heap del kernel, dispatcher de syscalls
     //          real (aquí `caps::enforce` pasa a llamarse por cada syscall)
     // TODO M3: framebuffer (Multiboot2 tag de vídeo) + texto en pantalla

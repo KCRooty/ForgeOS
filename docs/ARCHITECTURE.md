@@ -41,9 +41,13 @@ Categorías actuales (`CapMask`, `u32`, una por bit):
 ## Roadmap de milestones
 
 - **M0** ✅ — boot Multiboot2 → Long Mode → Rust, log por serie
-- **M1** (en curso) — capability gating (`caps.rs`), GDT/TSS propias, IDT +
-  handlers de excepción (`#0` divide error, `#3` breakpoint, `#8` double
-  fault en pila IST separada, `#13` GPF, `#14` page fault)
+- **M1** (en curso) — capability gating (`caps.rs`) ✅, GDT/TSS propias
+  (`gdt.rs`) ✅ *borrador sin verificar*, IDT + handlers de excepción
+  (`idt.rs`) ✅ *borrador sin verificar* — `#0` divide error, `#3`
+  breakpoint, `#6` invalid opcode, `#8` double fault en pila IST separada,
+  `#13` GPF, `#14` page fault (con lectura de CR2)
+- **M1c** — PIC 8259 remapeado (mover IRQs de hardware fuera del rango
+  0-31 que usan las excepciones de CPU)
 - **M2** — allocador físico de páginas, heap del kernel, primer dispatcher
   de syscalls real (aquí `caps::enforce` se vuelve operativo)
 - **M3** — framebuffer (tag de vídeo Multiboot2) + texto en pantalla
