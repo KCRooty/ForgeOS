@@ -85,3 +85,33 @@ pub fn free_frame(addr: u64) {
 pub fn free_frame_count() -> usize {
     (0..MAX_FRAMES).filter(|&i| !is_used(i)).count()
 }
+
+/// Busca `count` frames libres SEGUIDOS — algunos dispositivos (el
+/// buffer de recepción del RTL8139, por ejemplo) exigen un rango físico
+/// contiguo, no basta con "count frames sueltos" repartidos. Lineal,
+/// O(n) — aceptable para las pocas veces que hace falta (anillos DMA de
+/// red, no una operación de uso frecuente).
+pub fn alloc_contiguous(count: usize) -> Option<u64> {
+    if count == 0 || count > MAX_FRAMES {
+        return None;
+    }
+    let mut run_start = 0usize;
+    let mut run_len = 0usize;
+    for i in 0..MAX_FRAMES {
+        if !is_used(i) {
+            if run_len == 0 {
+                run_start = i;
+            }
+            run_len += 1;
+            if run_len == count {
+                for f in run_start..run_start + count {
+                    set_used(f);
+                }
+                return Some(run_start as u64 * FRAME_SIZE);
+            }
+        } else {
+            run_len = 0;
+        }
+    }
+    None
+}
