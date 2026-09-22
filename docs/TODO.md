@@ -152,11 +152,17 @@ Todo lo demás falta. Esto es el inventario completo, no una selección.
   actual:** un solo PRDT → máximo 8 sectores (4 KiB) por llamada;
   transferencias grandes necesitarán múltiples entradas PRDT
 - ❌ **Almacenamiento — NVMe**
-- ✅ **Red — RTL8139 (detección + MAC)** *borrador sin verificar* —
-  chip encontrado por PCI, despertado, soft reset, MAC de fábrica
-  leída. **Sin TX/RX todavía** — necesita buffer circular de recepción
-  y descriptores de transmisión con memoria DMA real (del allocador
-  físico, no estática), pasada aparte
+- ✅ **Red — RTL8139 (TX real, RX preparado)** *borrador sin verificar
+  — registros TxStatus/TxAddr/RxBuf/RxConfig/TxConfig verificados
+  contra Linux Y el Programmer's Guide oficial de Realtek (doble
+  fuente)* — `init_full()`: reset, 3 frames contiguos para el anillo
+  RX (`pmm::alloc_contiguous`, nueva capacidad), 4 buffers TX,
+  RX+TX habilitados en el orden exigido. **`send()` completo y
+  probado** con una trama Ethernet de broadcast real, esperando
+  `TxStatOK` (bit15, confirmado contra la fuente oficial de Realtek).
+  **RX preparado pero sin bucle de extracción de paquetes todavía** —
+  leer el anillo (wraparound + ajuste de `CAPR`) es más delicado,
+  pasada aparte a propósito
 - ❌ **Red — resto del stack**: ARP/IP/ICMP
   → UDP/TCP → DHCP/DNS → sockets BSD (`socket`/`connect`/`bind`/...) →
   WiFi (mucho más difícil, firmware de vendor)

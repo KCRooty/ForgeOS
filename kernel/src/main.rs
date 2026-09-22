@@ -275,6 +275,22 @@ pub extern "C" fn kernel_main_upper(mb2_info_ptr: u64) -> ! {
         );
     }
 
+    // RTL8139 TX real — trama Ethernet de broadcast construida a mano:
+    // dest=ff:ff:ff:ff:ff:ff, src=nuestra MAC, ethertype=0x88B5
+    // (reservado para experimentación IEEE, no colisiona con nada real).
+    if let Some(mut nic) = rtl8139::init_full() {
+        let mut frame = [0u8; 60];
+        frame[0..6].copy_from_slice(&[0xFF; 6]); // destino: broadcast
+        frame[6..12].copy_from_slice(&nic.mac); // origen: nuestra MAC
+        frame[12] = 0x88;
+        frame[13] = 0xB5; // ethertype experimental
+
+        match rtl8139::send(&mut nic, &frame) {
+            Ok(()) => serial_println!("[rtl8139] trama de prueba enviada y confirmada (TxStatOK)"),
+            Err(e) => serial_println!("[rtl8139] fallo al enviar: {}", e),
+        }
+    }
+
     // TODO M2b: heap real con free-list (recuperar memoria de dealloc)
     // TODO M2c: syscalls reales — aquí `caps::enforce` pasa a llamarse
     //           por cada una
