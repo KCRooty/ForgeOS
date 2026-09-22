@@ -77,7 +77,25 @@ fn dispatch(port: &mut SerialPort, line: &str) {
 
     match cmd {
         "help" => {
-            let _ = write!(port, "comandos: help, meminfo, caps, bp, panic, fb, pci, ahci, net\r\n");
+            let _ = write!(port, "comandos: help, meminfo, caps, bp, panic, fb, pci, ahci, net, disktest\r\n");
+        }
+        "disktest" => {
+            match ahci::first_disk() {
+                Some(disk) => {
+                    let _ = write!(port, "probando escritura+relectura en LBA 2048 (no destructivo)...\r\n");
+                    match ahci::write_readback_test(&disk, 2048) {
+                        Ok(()) => {
+                            let _ = write!(port, "OK — escritura y relectura coinciden, el disco responde bien\r\n");
+                        }
+                        Err(e) => {
+                            let _ = write!(port, "FALLO: {}\r\n", e);
+                        }
+                    }
+                }
+                None => {
+                    let _ = write!(port, "no se encontró ningún disco SATA listo\r\n");
+                }
+            }
         }
         "pci" => pci::scan_and_print(),
         "ahci" => ahci::probe_and_print(),

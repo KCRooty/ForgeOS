@@ -86,15 +86,14 @@ Todo lo demás falta. Esto es el inventario completo, no una selección.
 
 ## 4. HAL — drivers de hardware
 
-- ✅ **Almacenamiento — AHCI (comandos + lectura real)** *borrador sin
-  verificar* — Command List + Command Table + FIS H2D, `IDENTIFY
-  DEVICE` (modelo del disco) y **`READ DMA EXT` (LBA48) leyendo
-  sectores de verdad**, con verificación de firma MBR 0x55AA como
-  prueba. Registros verificados contra Linux; formato FIS/Command Table
-  es estándar de hardware universal. **Limitación actual:** un solo
-  PRDT → máximo 8 sectores (4 KiB) por llamada; transferencias grandes
-  necesitarán múltiples entradas PRDT. **Pendiente:** `WRITE DMA EXT`
-  (escritura)
+- ✅ **Almacenamiento — AHCI (lectura + escritura reales)** *borrador
+  sin verificar* — Command List + Command Table + FIS H2D; `IDENTIFY
+  DEVICE`, **`READ DMA EXT` y `WRITE DMA EXT` (LBA48)** + `FLUSH CACHE
+  EXT`. Verificación por firma MBR 0x55AA al arrancar, y comando
+  `disktest` en la consola para una prueba de escritura+relectura no
+  destructiva. Registros verificados contra Linux. **Limitación
+  actual:** un solo PRDT → máximo 8 sectores (4 KiB) por llamada;
+  transferencias grandes necesitarán múltiples entradas PRDT
 - ❌ **Almacenamiento — NVMe**
 - ✅ **Red — RTL8139 (detección + MAC)** *borrador sin verificar* —
   chip encontrado por PCI, despertado, soft reset, MAC de fábrica
