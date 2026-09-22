@@ -85,7 +85,7 @@ patrón arquitectónico probado repetidamente. Ver `ARCHITECTURE.md`.
 | **Programas open source pequeños/portables** | Port nativo caso a caso | Variable, evaluar cada uno |
 | **Steam (cliente)** | Solo vía capa de compatibilidad Linux — Valve no publica el cliente para OSes nuevos, nunca lo hará | Alta — depende de (1)+(2)+(3) arriba |
 | **Discord, Spotify** | Electron — misma capa de compatibilidad, mismos prerrequisitos que Steam | Alta |
-| **Navegadores reales (Chromium/Blink, Zen/Gecko)** | Capa de compatibilidad + son el software con más dependencias que existe (V8, compositing GPU, sandboxing por namespaces del kernel, cientos de códecs) | Muy alta — ni con la capa lista es trivial; es la pieza más dura de todo el roadmap |
+| **Navegadores reales (Chromium/Blink, Zen/Gecko)** | Capa de compatibilidad + son el software con más dependencias que existe (V8, compositing GPU, sandboxing por namespaces del kernel, cientos de códecs) | Muy alta — ni con la capa lista es trivial; es la pieza más dura de todo el roadmap. **Su arquitectura sí se estudia** (ver nota abajo) aunque no se intente portar |
 
 ## Firmware abierto — lo que es físicamente posible hoy
 
@@ -121,6 +121,31 @@ La referencia a ChromeOS en `PRODUCT.md`/`DESKTOP.md` es puramente
 Forge OS no lleva Chrome/Chromium en ningún sitio del núcleo; es
 precisamente lo contrario de "liviano" y no aporta nada a la base del
 sistema. Ver `PHILOSOPHY.md` — cero deuda heredada.
+
+## Nota: la arquitectura de Chromium sí se estudia (sin intentar portarlo)
+
+No se persigue portar Chromium/Blink — pero su arquitectura real (no la
+fuente) aporta dos lecciones directamente aplicables si algún día
+construimos un navegador propio mínimo (nuestra versión de "Selene", el
+de nyxos-dev):
+
+1. **Separación por procesos (browser process vs renderer process)** —
+   la innovación central de Chromium (2008): cada pestaña en su propio
+   proceso aislado, así un crash o compromiso no se lleva el navegador
+   entero. Encaja directo con lo que ya tenemos: `caps.rs` ya es el
+   mecanismo — un proceso "browser" con privilegios normales, un
+   proceso "renderer" por pestaña con `Capabilities` reducidas al
+   mínimo (sin red directa, sin filesystem, todo mediado por IPC).
+2. **`content/` como frontera de embedder** — Google separó el motor
+   reutilizable (`content/`) de su navegador concreto (`chrome/`),
+   comunicados por una API estable, no por que `content` conozca
+   detalles de `chrome`. Misma idea de capas que ya aplicamos en
+   `ARCHITECTURE.md` (Kernel→Executive→HAL).
+
+Nota al margen: los repos públicos de Discord (`react-native-screens`,
+`discord-api-docs`, etc.) son forks de terceros y documentación de
+API — ninguno es el cliente real. Confirma que sigue sin haber fuente
+que estudiar ni portar para Discord en sí.
 
 ## Dónde vive esto en el roadmap
 
