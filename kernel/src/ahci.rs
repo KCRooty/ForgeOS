@@ -55,6 +55,7 @@ const CMD_ST: u32 = 1 << 0; // Start
 const TFD_ERR: u32 = 1 << 0; // bit0 del Task File Data = ERR
 
 const ATA_CMD_IDENTIFY_DEVICE: u8 = 0xEC;
+const ATA_CMD_READ_DMA_EXT: u8 = 0x25;
 
 /// Command Header — una por slot, 32 bytes, formato estándar AHCI
 /// (spec §4.2.2, idéntico en cualquier implementación).
@@ -78,16 +79,24 @@ struct PrdtEntry {
     dbc_i: u32, // bits0-21 = bytes-1, bit31 = interrupt on completion
 }
 
-/// Inicializa el puerto (Command List + área de recepción de FIS) y
-/// emite `IDENTIFY DEVICE` en el slot 0. Devuelve el modelo del disco
-/// (40 bytes, tal como lo entrega el propio dispositivo) si el comando
-/// tiene éxito.
+/// Estado de un puerto ya inicializado — guarda las direcciones físicas
+/// de sus estructuras para poder emitir más comandos sin re-montarlo
+/// todo cada vez.
+#[derive(Clone, Copy)]
+pub struct AhciPort {
+    port_base: u64,
+    cmd_list: u64,
+    cmd_table: u64,
+}
+
+/// Monta Command List + área de recepción de FIS para un puerto y
+/// arranca su motor de comandos. Se hace una sola vez por puerto.
 ///
 /// Simplificación deliberada de esta pasada: no esperamos activamente a
 /// que PxCMD.CR/FR reflejen el estado antes de continuar — la mayoría
 /// de implementaciones de referencia sí lo hacen; en QEMU funciona sin
 /// eso, en hardware real podría necesitar ese endurecimiento después.
-unsafe fn init_port_and_identify(port_base: u64) -> Option<[u8; 40]> {
+unsafe fn init_port(port_base: u64) -> Option<AhciPort> {
     // Parar el motor de comandos por si venía arrancado de antes.
     let mut cmd = reg_read(port_base, PORT_CMD_REG);
     cmd &= !CMD_ST;
@@ -96,13 +105,11 @@ unsafe fn init_port_and_identify(port_base: u64) -> Option<[u8; 40]> {
     let cmd_list = crate::pmm::alloc_frame()?;
     let fis_area = crate::pmm::alloc_frame()?;
     let cmd_table = crate::pmm::alloc_frame()?;
-    let data_buf = crate::pmm::alloc_frame()?;
 
     // Los frames vienen con basura de uso físico previo — limpiamos.
     core::ptr::write_bytes(cmd_list as *mut u8, 0, 4096);
     core::ptr::write_bytes(fis_area as *mut u8, 0, 4096);
     core::ptr::write_bytes(cmd_table as *mut u8, 0, 4096);
-    core::ptr::write_bytes(data_buf as *mut u8, 0, 4096);
 
     reg_write(port_base, PORT_CLB, cmd_list as u32);
     reg_write(port_base, PORT_CLBU, (cmd_list >> 32) as u32);
@@ -116,48 +123,77 @@ unsafe fn init_port_and_identify(port_base: u64) -> Option<[u8; 40]> {
     cmd |= CMD_ST;
     reg_write(port_base, PORT_CMD_REG, cmd);
 
-    // Command header del slot 0 -> apunta a nuestra Command Table.
-    let header = &mut *(cmd_list as *mut CmdHeader);
+    Some(AhciPort {
+        port_base,
+        cmd_list,
+        cmd_table,
+    })
+}
+
+/// Emite un comando ATA en el slot 0 y espera (polling) a que termine.
+/// `setup_fis` recibe el puntero al FIS H2D ya puesto a cero para que
+/// el llamante rellene solo lo específico de su comando.
+///
+/// `byte_count` es el tamaño exacto del buffer de destino; `data_buf`
+/// debe ser una dirección física válida (frame de `pmm`).
+unsafe fn issue_command(
+    port: &AhciPort,
+    data_buf: u64,
+    byte_count: u32,
+    setup_fis: impl FnOnce(*mut u8),
+) -> Result<(), &'static str> {
+    // Limpiamos la Command Table entera antes de cada comando — evita
+    // arrastrar campos del comando anterior por descuido.
+    core::ptr::write_bytes(port.cmd_table as *mut u8, 0, 4096);
+
+    let header = &mut *(port.cmd_list as *mut CmdHeader);
     header.flags = 5; // CFL=5 DWORDS: el FIS H2D Register mide exactamente eso
     header.prdtl = 1;
     header.prdbc = 0;
-    header.ctba = cmd_table as u32;
-    header.ctba_hi = (cmd_table >> 32) as u32;
+    header.ctba = port.cmd_table as u32;
+    header.ctba_hi = (port.cmd_table >> 32) as u32;
 
-    // FIS H2D Register para IDENTIFY DEVICE, al principio de la Command
-    // Table (spec §5.3.6.1 / FIS H2D §10.3.4).
-    let cfis = cmd_table as *mut u8;
+    let cfis = port.cmd_table as *mut u8;
     *cfis.add(0) = 0x27; // FIS type: Register — Host to Device
     *cfis.add(1) = 0x80; // bit7=C (actualización de comando), PM port 0
-    *cfis.add(2) = ATA_CMD_IDENTIFY_DEVICE;
-    // resto de bytes del FIS ya están a 0 por el write_bytes de arriba
+    setup_fis(cfis);
 
-    // PRDT en offset 0x80 de la Command Table (spec §4.2.3.1) — una
-    // sola entrada apuntando al buffer de 512 bytes donde el
-    // dispositivo va a volcar los datos de IDENTIFY.
-    let prdt = &mut *((cmd_table + 0x80) as *mut PrdtEntry);
+    // PRDT en offset 0x80 de la Command Table (spec §4.2.3.1).
+    let prdt = &mut *((port.cmd_table + 0x80) as *mut PrdtEntry);
     prdt.dba = data_buf as u32;
     prdt.dba_hi = (data_buf >> 32) as u32;
     prdt.reserved = 0;
-    prdt.dbc_i = 511; // bytes-1; bit31=0, sin IRQ, hacemos polling
+    prdt.dbc_i = byte_count - 1; // bytes-1; bit31=0, sin IRQ, hacemos polling
 
-    // Emitir el comando en el slot 0.
-    reg_write(port_base, PORT_CI, 1);
+    reg_write(port.port_base, PORT_CI, 1);
 
-    // Polling hasta que el bit del slot se limpie (comando completado)
-    // o hasta timeout — sin IRQ configurada para esta pasada.
+    // Polling hasta que el bit del slot se limpie o hasta timeout —
+    // sin IRQ configurada para esta pasada.
     let mut timeout = 1_000_000u32;
-    while reg_read(port_base, PORT_CI) & 1 != 0 {
+    while reg_read(port.port_base, PORT_CI) & 1 != 0 {
         timeout -= 1;
         if timeout == 0 {
-            serial_println!("[ahci] IDENTIFY: timeout esperando a que termine el comando");
-            return None;
+            return Err("timeout esperando a que termine el comando");
         }
     }
 
-    let tfd = reg_read(port_base, PORT_TFD);
-    if tfd & TFD_ERR != 0 {
-        serial_println!("[ahci] IDENTIFY: el dispositivo devolvió error (TFD=0x{:x})", tfd);
+    if reg_read(port.port_base, PORT_TFD) & TFD_ERR != 0 {
+        return Err("el dispositivo devolvió error (TFD.ERR)");
+    }
+    Ok(())
+}
+
+/// `IDENTIFY DEVICE` — devuelve el modelo del disco (40 bytes, tal como
+/// lo entrega el propio dispositivo).
+unsafe fn identify(port: &AhciPort) -> Option<[u8; 40]> {
+    let data_buf = crate::pmm::alloc_frame()?;
+    core::ptr::write_bytes(data_buf as *mut u8, 0, 4096);
+
+    if let Err(e) = issue_command(port, data_buf, 512, |cfis| {
+        *cfis.add(2) = ATA_CMD_IDENTIFY_DEVICE;
+    }) {
+        serial_println!("[ahci] IDENTIFY: {}", e);
+        crate::pmm::free_frame(data_buf);
         return None;
     }
 
@@ -171,7 +207,53 @@ unsafe fn init_port_and_identify(port_base: u64) -> Option<[u8; 40]> {
         model[i * 2] = (word >> 8) as u8;
         model[i * 2 + 1] = (word & 0xFF) as u8;
     }
+    crate::pmm::free_frame(data_buf);
     Some(model)
+}
+
+/// Lee `count` sectores de 512 bytes empezando en el LBA dado, usando
+/// `READ DMA EXT` (LBA48). Copia el resultado a `dest`.
+///
+/// `dest.len()` debe ser exactamente `count * 512`. Un solo PRDT de
+/// 4 KiB limita esta versión a 8 sectores por llamada — suficiente para
+/// leer superbloques/inodos en M5; transferencias grandes necesitarán
+/// varias entradas PRDT.
+pub fn read_sectors(port: &AhciPort, lba: u64, count: u16, dest: &mut [u8]) -> Result<(), &'static str> {
+    let byte_count = count as usize * 512;
+    if dest.len() != byte_count {
+        return Err("el buffer de destino no coincide con count*512");
+    }
+    if byte_count > 4096 {
+        return Err("máximo 8 sectores por llamada en esta versión (un solo PRDT)");
+    }
+
+    unsafe {
+        let data_buf = match crate::pmm::alloc_frame() {
+            Some(f) => f,
+            None => return Err("sin memoria física para el buffer DMA"),
+        };
+        core::ptr::write_bytes(data_buf as *mut u8, 0, 4096);
+
+        let result = issue_command(port, data_buf, byte_count as u32, |cfis| {
+            *cfis.add(2) = ATA_CMD_READ_DMA_EXT;
+            // LBA48: bytes bajos en 4-6, altos en 8-10 (spec ATA §7.24)
+            *cfis.add(4) = lba as u8;
+            *cfis.add(5) = (lba >> 8) as u8;
+            *cfis.add(6) = (lba >> 16) as u8;
+            *cfis.add(7) = 1 << 6; // device: bit6 = modo LBA
+            *cfis.add(8) = (lba >> 24) as u8;
+            *cfis.add(9) = (lba >> 32) as u8;
+            *cfis.add(10) = (lba >> 40) as u8;
+            *cfis.add(12) = count as u8;
+            *cfis.add(13) = (count >> 8) as u8;
+        });
+
+        if result.is_ok() {
+            core::ptr::copy_nonoverlapping(data_buf as *const u8, dest.as_mut_ptr(), byte_count);
+        }
+        crate::pmm::free_frame(data_buf);
+        result
+    }
 }
 
 fn model_to_string(model: &[u8; 40]) -> String {
@@ -274,13 +356,39 @@ pub fn probe_and_print() {
             };
 
             if sig == SATA_SIG_ATA {
-                match init_port_and_identify(port_base) {
-                    Some(model) => {
-                        let name = model_to_string(&model);
-                        serial_println!("[ahci] puerto {}: {} — modelo: \"{}\"", port, kind, name);
+                match init_port(port_base) {
+                    Some(p) => {
+                        match identify(&p) {
+                            Some(model) => {
+                                let name = model_to_string(&model);
+                                serial_println!("[ahci] puerto {}: {} — modelo: \"{}\"", port, kind, name);
+                            }
+                            None => {
+                                serial_println!("[ahci] puerto {}: {} — IDENTIFY falló, ver arriba", port, kind);
+                            }
+                        }
+
+                        // Prueba de lectura real: sector 0 (MBR / inicio
+                        // del disco). Si la firma 0x55AA está presente,
+                        // es un MBR válido — prueba fuerte de que la
+                        // lectura DMA funciona de verdad.
+                        let mut sector = [0u8; 512];
+                        match read_sectors(&p, 0, 1, &mut sector) {
+                            Ok(()) => {
+                                serial_println!(
+                                    "[ahci] sector 0 leído: primeros bytes {:02x} {:02x} {:02x} {:02x}, firma final {:02x}{:02x}",
+                                    sector[0], sector[1], sector[2], sector[3],
+                                    sector[510], sector[511]
+                                );
+                                if sector[510] == 0x55 && sector[511] == 0xAA {
+                                    serial_println!("[ahci] firma MBR 0x55AA presente — lectura DMA correcta");
+                                }
+                            }
+                            Err(e) => serial_println!("[ahci] lectura del sector 0 falló: {}", e),
+                        }
                     }
                     None => {
-                        serial_println!("[ahci] puerto {}: {} — IDENTIFY falló, ver arriba", port, kind);
+                        serial_println!("[ahci] puerto {}: {} — no se pudo inicializar (¿sin memoria?)", port, kind);
                     }
                 }
             } else {
