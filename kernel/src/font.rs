@@ -1,0 +1,30 @@
+//! Fuente bitmap 8x8 mínima — M3b (BORRADOR SIN VERIFICAR).
+//!
+//! Diseñada a mano, glifo a glifo — no es una reproducción de ninguna
+//! fuente estándar (no me fío de reproducir de memoria una tabla ASCII
+//! completa byte-exacta sin poder verla renderizada). Cubre solo lo
+//! necesario para el banner de arranque: F, O, R, G, E, S, B, T, K y
+//! espacio. Ampliar el `match` es trivial — cada entrada son 8 bytes,
+//! uno por fila, bit más significativo = píxel más a la izquierda.
+
+pub const GLYPH_WIDTH: u32 = 8;
+pub const GLYPH_HEIGHT: u32 = 8;
+
+pub fn glyph(c: char) -> [u8; 8] {
+    match c.to_ascii_uppercase() {
+        'F' => [0xF8, 0x80, 0x80, 0xF0, 0x80, 0x80, 0x80, 0x00],
+        'O' => [0x7C, 0x82, 0x82, 0x82, 0x82, 0x82, 0x7C, 0x00],
+        'R' => [0xF0, 0x88, 0x88, 0xF0, 0x90, 0x88, 0x84, 0x00],
+        'G' => [0x7C, 0x82, 0x80, 0x8E, 0x82, 0x82, 0x7C, 0x00],
+        'E' => [0xFE, 0x80, 0x80, 0xFC, 0x80, 0x80, 0xFE, 0x00],
+        'S' => [0x7E, 0x80, 0x80, 0x7C, 0x02, 0x02, 0xFC, 0x00],
+        'B' => [0xF8, 0x84, 0x84, 0xF8, 0x84, 0x84, 0xF8, 0x00],
+        'T' => [0xFE, 0x10, 0x10, 0x10, 0x10, 0x10, 0x10, 0x00],
+        'K' => [0x84, 0x88, 0x90, 0xE0, 0x90, 0x88, 0x84, 0x00],
+        ' ' => [0x00; 8],
+        // TODO: ampliar el alfabeto según haga falta. Cualquier carácter
+        // no cubierto dibuja un bloque relleno a propósito — que se note
+        // el hueco en vez de desaparecer en silencio.
+        _ => [0xFF; 8],
+    }
+}

@@ -73,6 +73,10 @@ Categorías actuales (`CapMask`, `u32`, una por bit):
   `boot.asm` (1024×768@32bpp), parser + patrón de prueba de 8 barras de
   color (`framebuffer.rs`), comando `fb` en la consola para redibujar a
   demanda
+- **M3b** ✅ *borrador sin verificar* — fuente bitmap 8x8 mínima diseñada
+  a mano (`font.rs`, alfabeto parcial: F/O/R/G/E/S/B/T/K + espacio),
+  `draw_char`/`draw_str` en `framebuffer.rs`, banner "FORGE OS BOOT OK"
+  sobre el patrón de barras
 - **M4** — scheduler + tabla de procesos con `Capabilities` por proceso;
   Object Manager
 - **M5** — VFS + initramfs
