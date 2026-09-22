@@ -60,8 +60,9 @@ Lo que sí necesita nombre propio:
 
 ## Fuera de alcance (por ahora)
 
-- **Capa de compatibilidad binaria con Linux/Windows** (para correr
-  Discord, Steam, o cualquier `.exe`/ELF de Linux tal cual) — proyecto
-  del tamaño del kernel, decisión aparte cuando el OS nativo esté sólido
-- **WiFi con drivers 100% propios sin firmware de vendor** — mismo
-  problema que NVIDIA en el roadmap gráfico, ver `ARCHITECTURE.md`
+Ver [COMPATIBILITY.md](COMPATIBILITY.md) para el análisis completo —
+capa de compatibilidad Linux (Steam, Discord, Spotify, navegadores
+reales) y el estado real del firmware/hardware abierto (coreboot,
+Intel ME, AMD PSP). Resumen: ninguna de las dos cosas está a la vuelta
+de la esquina, y ninguna de las dos las resuelve nadie al 100% hoy —
+Linux y FreeBSD tampoco.
