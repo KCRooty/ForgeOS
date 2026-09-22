@@ -70,7 +70,8 @@ fn dispatch(port: &mut SerialPort, line: &str) {
         "fb" => {
             if framebuffer::available() {
                 framebuffer::test_pattern();
-                let _ = write!(port, "patrón de prueba redibujado\r\n");
+                framebuffer::draw_str(20, 20, "FORGE OS BOOT OK", 0x00000000, 4);
+                let _ = write!(port, "patrón + banner redibujados\r\n");
             } else {
                 let _ = write!(port, "sin framebuffer disponible\r\n");
             }
