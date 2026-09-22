@@ -89,9 +89,14 @@ Todo lo demás falta. Esto es el inventario completo, no una selección.
   syscalls reales — un `exit()` que recupere el control de la consola
   necesita integración con el scheduler (guardar/restaurar contexto
   como `task.rs`), pieza aparte todavía no hecha
-- ❌ **`caps::enforce` conectado de verdad** — el dispatcher ya existe
-  (`syscall_dispatch`), falta llamar `caps::enforce` por cada syscall
-  antes de ejecutarla
+- ✅ **`caps::enforce` conectado de verdad (M4h)** *borrador sin
+  verificar* — `syscall_dispatch` ahora exige `CAP_STDIO` antes de
+  atender `SYS_PING`. Slot global "proceso actual" (`caps::set_current`)
+  como paso intermedio honesto — todavía no hay PCB por proceso donde
+  guardarlo individualmente (eso es la integración con el scheduler,
+  sigue pendiente). Dos comandos de consola para ver los dos casos:
+  `synccalltest` (con `CAP_STDIO`, permitido) y `synccalldeny` (sin él,
+  denegado con log explícito)
 - ❌ **wait()/exit()** — recolección de procesos zombie
 - ❌ **Señales** (signals) — al menos SIGKILL/SIGTERM/SIGSEGV
 - ❌ **Dispatcher de syscalls real** — el punto donde `caps::enforce`
