@@ -77,8 +77,19 @@ Categorías actuales (`CapMask`, `u32`, una por bit):
   a mano (`font.rs`, alfabeto parcial: F/O/R/G/E/S/B/T/K + espacio),
   `draw_char`/`draw_str` en `framebuffer.rs`, banner "FORGE OS BOOT OK"
   sobre el patrón de barras
-- **M4** — scheduler + tabla de procesos con `Capabilities` por proceso;
-  Object Manager
+- **M4a** ✅ *borrador sin verificar* — tareas cooperativas del kernel
+  (`task.rs` + `scheduler.rs`), cambio de contexto real, demo de 2
+  tareas intercaladas
+- **M4b (primer paso)** ✅ *borrador sin verificar* — Local APIC +
+  timer periódico (`apic.rs`), primera activación de interrupciones de
+  hardware (`sti`) en todo el kernel. Identity-map de `boot.asm`
+  ampliado de 1 a 4 GiB para alcanzar el Local APIC (~0xFEE00000)
+- **M4b (continuación)** — conectar el timer con el scheduler para
+  preemption real de verdad; necesita guardar el frame de registros
+  completo desde un handler asíncrono, no solo callee-saved
+- **M4c** — espacios de direcciones por tarea (necesita gestor de
+  memoria virtual real); Object Manager; tabla de procesos con
+  `Capabilities` por proceso
 - **M5** — VFS + initramfs
 - **M6+** — HAL de gráficos (fase 0-6 ya detallada en la conversación:
   framebuffer software → virtio-gpu → Intel real → AMD → NVIDIA vía

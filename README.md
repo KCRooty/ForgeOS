@@ -12,7 +12,7 @@ Ver [docs/PHILOSOPHY.md](docs/PHILOSOPHY.md) (diseño técnico) y
 [docs/PRODUCT.md](docs/PRODUCT.md) (a quién sirve y por qué) para el
 razonamiento completo detrás de cada decisión.
 
-## Estado: M4a — primer cambio de contexto real (tareas cooperativas de kernel), sin verificar en QEMU (en construcción)
+## Estado: M4b (primer paso) — Local APIC + timer real, primer `sti` del kernel, sin verificar en QEMU (en construcción)
 
 ## Referencias de arquitectura estudiadas
 - Asmodeus14/Nyx (Rust, QCLang, motor 3D Gen9.5 hand-rolled)

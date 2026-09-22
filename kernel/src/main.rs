@@ -12,6 +12,7 @@ extern crate alloc;
 
 mod caps;
 mod console;
+mod apic;
 mod font;
 mod framebuffer;
 mod gdt;
@@ -118,11 +119,31 @@ pub extern "C" fn kernel_main_upper(mb2_info_ptr: u64) -> ! {
     }
     serial_println!("[sched] de vuelta en boot — si viste A/B intercalados arriba, el cambio de contexto funciona");
 
+    // M4b (primer paso) — Local APIC + timer periódico. Momento delicado:
+    // es la PRIMERA vez en todo el kernel que activamos interrupciones de
+    // hardware de verdad (`sti`). Si algo en IDT/PIC/APIC está mal, este
+    // es el punto donde se notaría — un GPF en bucle, o el timer que
+    // nunca llega.
+    unsafe {
+        apic::init();
+        apic::start_periodic_timer(10_000_000); // valor arbitrario, sin calibrar
+        serial_println!("[apic] activando interrupciones (sti) por primera vez en el kernel");
+        core::arch::asm!("sti");
+
+        while apic::tick_count() < 5 {
+            core::arch::asm!("hlt"); // espera eficiente, se despierta con cada interrupción
+        }
+    }
+    serial_println!("[apic] {} ticks recibidos — el timer de hardware funciona de verdad", apic::tick_count());
+
     // TODO M2b: heap real con free-list (recuperar memoria de dealloc)
     // TODO M2c: syscalls reales — aquí `caps::enforce` pasa a llamarse
     //           por cada una
     // TODO M3c: ampliar el alfabeto de font.rs más allá de F/O/R/G/E/S/B/T/K
-    // TODO M4b: preemption real (necesita timer + IRQ, ver TODO.md §1)
+    // TODO M4b (continuación): conectar el timer con el scheduler para
+    //           preemption real — necesita guardar TODOS los registros
+    //           de propósito general desde el handler asíncrono, no solo
+    //           los callee-saved de task.rs
     // TODO M4c: espacios de direcciones por tarea (necesita gestor de
     //           memoria virtual real, ver TODO.md §1) — de ahí a fork/exec
     // TODO M6+: Anvil + terminal ("Crucible")

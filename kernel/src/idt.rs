@@ -16,7 +16,6 @@
 use crate::gdt;
 use crate::serial_println;
 use core::mem::size_of;
-
 #[repr(C)]
 pub struct InterruptStackFrame {
     pub instruction_pointer: u64,
@@ -77,6 +76,8 @@ pub fn init() {
         IDT[8].set_handler(double_fault as u64, 1); // ist=1 -> gdt::DOUBLE_FAULT_IST_INDEX
         IDT[13].set_handler(general_protection_fault as u64, 0);
         IDT[14].set_handler(page_fault as u64, 0);
+        IDT[crate::apic::TIMER_VECTOR as usize]
+            .set_handler(crate::apic::timer_interrupt_handler as u64, 0);
 
         let ptr = IdtPointer {
             limit: (size_of::<[IdtEntry; 256]>() - 1) as u16,
