@@ -101,8 +101,13 @@ Todo lo demás falta. Esto es el inventario completo, no una selección.
 - ❌ **Señales** (signals) — al menos SIGKILL/SIGTERM/SIGSEGV
 - ❌ **Dispatcher de syscalls real** — el punto donde `caps::enforce`
   se vuelve operativo por primera vez, no solo demo
-- ❌ **IPC** — pipes como mínimo; mailbox/mensajería como en
-  Asmodeus14/Nyx es buen precedente
+- ✅ **IPC — pipes (M4i)** *borrador sin verificar* — `pipe.rs`, buffer
+  circular por pipe (FIFO real, probado escribiendo más de lo que se
+  lee de golpe y comprobando que el resto queda pendiente). Namespace
+  global por ID, sin bloqueo todavía (leer/escribir de un pipe vacío
+  no espera — bloquear de verdad necesita integración con el
+  scheduler). Mailbox/mensajería como en Asmodeus14/Nyx sigue siendo
+  buen precedente para una versión más rica más adelante
 - ❌ **Memoria compartida (SHM)** — necesaria más adelante para el
   compositor gráfico (ventanas cliente)
 - ❌ **Ember** (nombre propuesto) — sistema de inicialización, PID 1.

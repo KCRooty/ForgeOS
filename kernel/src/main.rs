@@ -25,6 +25,7 @@ mod mb2;
 mod mmu;
 mod pci;
 mod pic;
+mod pipe;
 mod pmm;
 mod psf;
 mod ring3;
@@ -253,6 +254,26 @@ pub extern "C" fn kernel_main_upper(mb2_info_ptr: u64) -> ! {
         None => serial_println!("[vfs] no se encontró el fichero recién escrito"),
     }
     serial_println!("[vfs] ficheros: {:?}", vfs::list());
+
+    // IPC — pipes. Prueba real: escribimos más de lo que leemos de
+    // golpe, comprobamos que el resto sigue esperando en el pipe (FIFO
+    // de verdad, no solo un buffer que se vacía entero).
+    pipe::init();
+    let test_pipe = pipe::create();
+    match pipe::write(test_pipe, b"Hola") {
+        Ok(n) => serial_println!("[pipe] escritos {} bytes", n),
+        Err(e) => serial_println!("[pipe] fallo al escribir: {}", e),
+    }
+    match pipe::read(test_pipe, 2) {
+        Ok(data) => serial_println!("[pipe] leídos 2 bytes: {:?} (esperado 'Ho')", data),
+        Err(e) => serial_println!("[pipe] fallo al leer: {}", e),
+    }
+    if let Some(pending) = pipe::pending(test_pipe) {
+        serial_println!(
+            "[pipe] quedan {} bytes pendientes (esperado 2, 'la') — FIFO funciona",
+            pending
+        );
+    }
 
     // TODO M2b: heap real con free-list (recuperar memoria de dealloc)
     // TODO M2c: syscalls reales — aquí `caps::enforce` pasa a llamarse
