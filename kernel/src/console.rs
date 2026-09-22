@@ -36,7 +36,19 @@ pub fn run() -> ! {
 fn read_line(port: &mut SerialPort) -> String {
     let mut buf: Vec<u8> = Vec::new();
     loop {
-        let byte = port.read_byte();
+        // Escuchamos teclado PS/2 y puerto serie a la vez — el primero
+        // que tenga un byte listo gana. `hlt` evita busy-spinning
+        // mientras esperamos a cualquiera de los dos.
+        let byte = loop {
+            if let Some(b) = crate::keyboard::try_read_byte() {
+                break b;
+            }
+            if let Some(b) = port.try_read_byte() {
+                break b;
+            }
+            unsafe { core::arch::asm!("hlt") };
+        };
+
         match byte {
             CR | LF => {
                 let _ = write!(port, "\r\n");

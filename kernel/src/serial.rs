@@ -53,6 +53,16 @@ impl SerialPort {
         while !Self::is_data_ready() {}
         unsafe { inb(COM1) }
     }
+
+    /// Variante no bloqueante — para poder escuchar serie y teclado a
+    /// la vez sin que ninguno de los dos bloquee al otro.
+    pub fn try_read_byte(&mut self) -> Option<u8> {
+        if Self::is_data_ready() {
+            Some(unsafe { inb(COM1) })
+        } else {
+            None
+        }
+    }
 }
 
 impl fmt::Write for SerialPort {
