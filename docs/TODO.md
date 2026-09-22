@@ -25,10 +25,15 @@ Todo lo demás falta. Esto es el inventario completo, no una selección.
   periódico es un valor arbitrario sin calibrar contra PIT/TSC; no
   corresponde a una frecuencia real en Hz todavía
 - ❌ **Driver RTC** (reloj de pared — hora/fecha real, ya mencionado)
-- ❌ **Gestor de memoria virtual completo** — hoy solo hay identity-map
-  fijo montado en boot.asm; falta una API real desde Rust para
-  mapear/desmapear páginas arbitrarias, imprescindible para procesos
-  con su propio espacio de direcciones
+- ✅ **Gestor de memoria virtual (M4c)** *borrador sin verificar* —
+  `mmu.rs`: `map_page`/`unmap_page` sobre la jerarquía de páginas
+  activa, creación de tablas intermedias sobre la marcha, probado con
+  escritura+lectura real fuera del identity-map de 4 GiB. **Limitación:**
+  no parte huge pages existentes — falla explícitamente si el camino
+  las cruza, en vez de corromperlas
+- ❌ **Espacios de direcciones por proceso** — `map_page` ya soporta
+  operar sobre un CR3 ajeno al activo; falta la lógica de
+  crear/cambiar espacios de direcciones completos
 - ❌ **Primitivas de sincronización** — spinlocks, mutex, semáforos;
   sin esto, SMP y cualquier estructura compartida son una bomba de
   relojería
