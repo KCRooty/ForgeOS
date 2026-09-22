@@ -131,6 +131,36 @@ pub unsafe fn current_address_space() -> u64 {
     read_cr3()
 }
 
+/// Traduce una dirección virtual a su física, en la jerarquía de
+/// páginas dada — sin crear nada, solo lectura. `None` si no está
+/// mapeada. Necesario para copiar datos a páginas recién mapeadas en un
+/// espacio de direcciones que todavía no está activo (no podemos
+/// escribir directamente a la dirección virtual porque CR3 no apunta
+/// ahí todavía).
+pub unsafe fn translate(p4: u64, virt: u64) -> Option<u64> {
+    let p3_entry = *((p4 + (table_index(virt, 3) as u64) * 8) as *const u64);
+    if p3_entry & PAGE_PRESENT == 0 {
+        return None;
+    }
+    let p3 = p3_entry & ADDR_MASK;
+
+    let p2_entry = *((p3 + (table_index(virt, 2) as u64) * 8) as *const u64);
+    if p2_entry & PAGE_PRESENT == 0 {
+        return None;
+    }
+    if p2_entry & PAGE_HUGE != 0 {
+        let huge_phys = p2_entry & ADDR_MASK;
+        return Some(huge_phys + (virt & 0x1F_FFFF));
+    }
+    let p2 = p2_entry & ADDR_MASK;
+
+    let p1_entry = *((p2 + (table_index(virt, 1) as u64) * 8) as *const u64);
+    if p1_entry & PAGE_PRESENT == 0 {
+        return None;
+    }
+    Some((p1_entry & ADDR_MASK) + (virt & 0xFFF))
+}
+
 /// Desmapea una página de 4 KiB previamente mapeada con `map_page`.
 /// No libera el frame físico — eso es responsabilidad del llamante
 /// (vía `pmm::free_frame`) si corresponde.
