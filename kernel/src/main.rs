@@ -6,6 +6,7 @@
 #![no_main]
 #![feature(abi_x86_interrupt)]
 #![feature(alloc_error_handler)]
+#![feature(naked_functions)]
 
 extern crate alloc;
 
@@ -19,7 +20,9 @@ mod idt;
 mod mb2;
 mod pic;
 mod pmm;
+mod scheduler;
 mod serial;
+mod task;
 
 use alloc::boxed::Box;
 use core::panic::PanicInfo;
@@ -101,14 +104,44 @@ pub extern "C" fn kernel_main_upper(mb2_info_ptr: u64) -> ! {
     framebuffer::test_pattern();
     framebuffer::draw_str(20, 20, "FORGE OS BOOT OK", 0x00000000, 4);
 
+    // M4a — primer cambio de contexto real. Dos tareas cooperativas se
+    // turnan con la propia función de arranque (tarea 0 implícita).
+    scheduler::init();
+    scheduler::spawn(task_a);
+    scheduler::spawn(task_b);
+    serial_println!(
+        "[sched] {} tareas registradas — cediendo turno 6 veces",
+        scheduler::task_count()
+    );
+    for _ in 0..6 {
+        scheduler::yield_now();
+    }
+    serial_println!("[sched] de vuelta en boot — si viste A/B intercalados arriba, el cambio de contexto funciona");
+
     // TODO M2b: heap real con free-list (recuperar memoria de dealloc)
     // TODO M2c: syscalls reales — aquí `caps::enforce` pasa a llamarse
     //           por cada una
     // TODO M3c: ampliar el alfabeto de font.rs más allá de F/O/R/G/E/S/B/T/K
-    // TODO M4: scheduler + tabla de procesos; shell real ("Bellows")
+    // TODO M4b: preemption real (necesita timer + IRQ, ver TODO.md §1)
+    // TODO M4c: espacios de direcciones por tarea (necesita gestor de
+    //           memoria virtual real, ver TODO.md §1) — de ahí a fork/exec
     // TODO M6+: Anvil + terminal ("Crucible")
 
     serial_println!("");
     serial_println!("Boot completo — entrando en la consola de depuración.");
     console::run()
+}
+
+fn task_a() -> ! {
+    loop {
+        serial_println!("[task A] hola desde la tarea A");
+        scheduler::yield_now();
+    }
+}
+
+fn task_b() -> ! {
+    loop {
+        serial_println!("[task B] hola desde la tarea B");
+        scheduler::yield_now();
+    }
 }
