@@ -132,6 +132,18 @@ Categorías actuales (`CapMask`, `u32`, una por bit):
   > Hasta entonces, esta fase queda bloqueada; el resto del roadmap
   > (framebuffer, virtio-gpu) no depende de ella.
 
+  > **Nota sobre APIs 3D (OpenGL/OpenGL ES/Vulkan):** Anvil (el
+  > compositor 2D) no necesita ninguna de las tres — fill_rect/blit es
+  > aceleración 2D pura, ya cubierta por la fase BLT de arriba. Una API
+  > 3D solo hace falta para juegos/apps con geometría real, y es una
+  > capa aparte, mucho más grande, encima del driver de GPU. Si algún
+  > día se aborda: **OpenGL ES primero** (spec más acotada, Mesa como
+  > referencia para verificar cada función, mismo método que ya usamos
+  > con los registros de AHCI/RTL8139) — Vulkan queda como aspiración
+  > mucho más lejana (spec de miles de páginas; Mesa tardó años con
+  > equipo grande solo en RADV), con AMDVLK como referencia cuando
+  > llegue ese momento.
+
 ## Convención de syscalls
 
 Heredada de Linux x86_64: instrucción `syscall`, `RAX` = número, argumentos
