@@ -13,7 +13,11 @@ if [ ! -f "$ISO" ]; then
 fi
 
 if [ "${1:-}" == "--headless" ]; then
-    qemu-system-x86_64 \
+    # timeout: la consola de depuración (console.rs) se queda esperando
+    # input por serie, que en modo --headless nunca llega — sin timeout,
+    # esto colgaría QEMU para siempre. El log hasta el prompt sigue
+    # siendo válido aunque el proceso se mate por timeout.
+    timeout 20 qemu-system-x86_64 \
         -cdrom "$ISO" \
         -m 256M \
         -no-reboot -no-shutdown \

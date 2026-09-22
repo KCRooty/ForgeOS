@@ -42,6 +42,17 @@ impl SerialPort {
         while !Self::is_transmit_empty() {}
         unsafe { outb(COM1, byte) };
     }
+
+    fn is_data_ready() -> bool {
+        unsafe { inb(COM1 + 5) & 0x01 != 0 }
+    }
+
+    /// Bloquea hasta que llegue un byte por el puerto serie. En QEMU con
+    /// `-serial stdio`, esto es literalmente tu teclado.
+    pub fn read_byte(&mut self) -> u8 {
+        while !Self::is_data_ready() {}
+        unsafe { inb(COM1) }
+    }
 }
 
 impl fmt::Write for SerialPort {
