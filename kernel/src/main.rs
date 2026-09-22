@@ -19,6 +19,7 @@ mod gdt;
 mod heap;
 mod idt;
 mod mb2;
+mod pci;
 mod pic;
 mod pmm;
 mod scheduler;
@@ -135,6 +136,11 @@ pub extern "C" fn kernel_main_upper(mb2_info_ptr: u64) -> ! {
         }
     }
     serial_println!("[apic] {} ticks recibidos — el timer de hardware funciona de verdad", apic::tick_count());
+
+    // Enumeración PCI — próximo cuello de botella del tablero: sin esto
+    // ningún driver real (disco, red, audio, GPU) puede encontrar su
+    // propio dispositivo.
+    pci::scan_and_print();
 
     // TODO M2b: heap real con free-list (recuperar memoria de dealloc)
     // TODO M2c: syscalls reales — aquí `caps::enforce` pasa a llamarse

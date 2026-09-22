@@ -34,8 +34,9 @@ Todo lo demás falta. Esto es el inventario completo, no una selección.
   relojería
 - ❌ **SMP** — arranque de cores adicionales (INIT/SIPI), estructuras
   per-CPU, scheduler independiente por core
-- ❌ **PCI enumeration** — requisito de CUALQUIER driver real (red,
-  disco, GPU, audio) — nada de HAL funciona sin esto primero
+- ✅ **PCI enumeration** *borrador sin verificar* — mecanismo clásico
+  (puertos 0xCF8/0xCFC), recorrido de 256 buses × 32 dispositivos × 8
+  funciones, comando `pci` en la consola de depuración
 
 ## 2. Procesos, scheduling y syscalls reales (M4)
 

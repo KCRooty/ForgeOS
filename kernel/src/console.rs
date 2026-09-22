@@ -10,7 +10,7 @@
 //! Ver docs/SHELL.md para la relación con el shell y el terminal reales.
 
 use crate::serial::SerialPort;
-use crate::{caps, framebuffer, pmm};
+use crate::{caps, framebuffer, pci, pmm};
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::fmt::Write;
@@ -65,8 +65,9 @@ fn dispatch(port: &mut SerialPort, line: &str) {
 
     match cmd {
         "help" => {
-            let _ = write!(port, "comandos: help, meminfo, caps, bp, panic, fb\r\n");
+            let _ = write!(port, "comandos: help, meminfo, caps, bp, panic, fb, pci\r\n");
         }
+        "pci" => pci::scan_and_print(),
         "fb" => {
             if framebuffer::available() {
                 framebuffer::test_pattern();
