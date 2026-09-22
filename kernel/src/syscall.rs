@@ -13,6 +13,7 @@
 //! lo que hace la inmensa mayoría de syscalls reales (escribir, leer,
 //! pedir memoria...) — no terminan el proceso, vuelven a él.
 
+use crate::caps;
 use crate::gdt;
 use crate::serial_println;
 
@@ -133,6 +134,19 @@ extern "C" fn syscall_dispatch(frame: *mut SyscallFrame) -> u64 {
     let frame = unsafe { &*frame };
     match frame.num {
         SYS_PING => {
+            // Primera vez que `caps::enforce` se llama de verdad desde
+            // una syscall real, no desde una demo aislada (M1). SYS_PING
+            // se trata como una operación de "consola/stdio" — requiere
+            // CAP_STDIO igual que cualquier syscall de escritura futura.
+            if let Err(v) = caps::enforce_current(caps::CAP_STDIO) {
+                serial_println!(
+                    "[syscall] SYS_PING DENEGADO — pedido=0x{:x}, otorgado=0x{:x} (falta CAP_STDIO)",
+                    v.requested,
+                    v.granted
+                );
+                return u64::MAX; // EPERM, convención simplificada
+            }
+
             serial_println!(
                 "[syscall] SYS_PING recibido desde ring 3 — arg0=0x{:x}. Volviendo a ring 3 vía sysret.",
                 frame.arg0

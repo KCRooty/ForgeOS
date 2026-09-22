@@ -12,7 +12,7 @@ Ver [docs/PHILOSOPHY.md](docs/PHILOSOPHY.md) (diseño técnico) y
 [docs/PRODUCT.md](docs/PRODUCT.md) (a quién sirve y por qué) para el
 razonamiento completo detrás de cada decisión.
 
-## Estado: M4g — syscall/sysret real, viaje ring3→kernel→ring3 completo, sin verificar en QEMU (en construcción)
+## Estado: M4h — caps::enforce conectado a syscalls de verdad, sin verificar en QEMU (en construcción)
 
 ## Referencias de arquitectura estudiadas
 - Asmodeus14/Nyx (Rust, QCLang, motor 3D Gen9.5 hand-rolled)

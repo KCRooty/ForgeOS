@@ -82,3 +82,29 @@ impl Capabilities {
         }
     }
 }
+
+// --- Capabilities del proceso actual — M4h, primer paso ---
+//
+// Todavía no tenemos un PCB por proceso donde guardar esto de forma
+// individual (eso es tarea de integrar procesos de usuario con el
+// scheduler, ver TODO.md). Como paso intermedio honesto: un único slot
+// global que se fija justo antes de saltar a ring 3, y que
+// `syscall_dispatch` consulta en cada syscall. Cuando exista un PCB
+// real, esto se sustituye por "las Capabilities del proceso que
+// interrumpió", no una variable global — anotado a propósito para que
+// no se nos olvide que es una simplificación temporal.
+
+static mut CURRENT: Capabilities = Capabilities::unrestricted();
+
+/// Fija las Capabilities del proceso que va a ejecutar a continuación
+/// (llamar justo antes de `ring3::enter_ring3`).
+pub fn set_current(caps: Capabilities) {
+    unsafe { CURRENT = caps };
+}
+
+/// Comprueba `cap` contra las Capabilities del proceso actual. Es la
+/// función que `syscall_dispatch` debe llamar antes de ejecutar
+/// cualquier syscall real.
+pub fn enforce_current(cap: CapMask) -> Result<(), CapViolation> {
+    unsafe { CURRENT.enforce(cap) }
+}
