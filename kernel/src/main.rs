@@ -14,6 +14,7 @@ mod caps;
 mod console;
 mod apic;
 mod ahci;
+mod elf;
 mod font;
 mod framebuffer;
 mod gdt;
@@ -27,6 +28,7 @@ mod pic;
 mod pmm;
 mod psf;
 mod rtl8139;
+mod vfs;
 mod scheduler;
 mod serial;
 mod task;
@@ -214,6 +216,41 @@ pub extern "C" fn kernel_main_upper(mb2_info_ptr: u64) -> ! {
             serial_println!("[proc] sin memoria física para el nuevo espacio de direcciones");
         }
     }
+
+    // M4e — cargador ELF64, probado contra un binario real y mínimo
+    // construido a mano (no bytes inventados) — ver elf.rs::TEST_ELF.
+    // Todavía no saltamos a él (eso necesita transición a ring 3,
+    // pieza aparte); esto demuestra que parseo + mapeo de segmentos
+    // funciona de verdad.
+    match elf::load(&elf::TEST_ELF) {
+        Ok(loaded) => {
+            serial_println!(
+                "[elf] cargado OK — entry=0x{:x} (esperado 0x400078), PML4=0x{:x}",
+                loaded.entry_point,
+                loaded.page_table
+            );
+            if loaded.entry_point == 0x400078 {
+                serial_println!("[elf] entry point coincide con lo calculado a mano — parseo correcto");
+            }
+        }
+        Err(e) => serial_println!("[elf] carga falló: {}", e),
+    }
+
+    // M5 — VFS mínimo (tmpfs plano). Prueba real: escribir, leer, y
+    // comprobar que el contenido coincide.
+    vfs::init();
+    vfs::write("hola.txt", b"Hola desde el VFS de Forge OS");
+    match vfs::read("hola.txt") {
+        Some(data) => {
+            if data == b"Hola desde el VFS de Forge OS" {
+                serial_println!("[vfs] escritura + lectura coinciden — VFS funciona");
+            } else {
+                serial_println!("[vfs] el contenido leído NO coincide con lo escrito");
+            }
+        }
+        None => serial_println!("[vfs] no se encontró el fichero recién escrito"),
+    }
+    serial_println!("[vfs] ficheros: {:?}", vfs::list());
 
     // TODO M2b: heap real con free-list (recuperar memoria de dealloc)
     // TODO M2c: syscalls reales — aquí `caps::enforce` pasa a llamarse

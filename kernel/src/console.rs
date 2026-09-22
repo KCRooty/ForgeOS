@@ -10,7 +10,7 @@
 //! Ver docs/SHELL.md para la relación con el shell y el terminal reales.
 
 use crate::serial::SerialPort;
-use crate::{ahci, caps, framebuffer, pci, pmm, rtl8139};
+use crate::{ahci, caps, framebuffer, pci, pmm, rtl8139, vfs};
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::fmt::Write;
@@ -77,7 +77,45 @@ fn dispatch(port: &mut SerialPort, line: &str) {
 
     match cmd {
         "help" => {
-            let _ = write!(port, "comandos: help, meminfo, caps, bp, panic, fb, pci, ahci, net, disktest\r\n");
+            let _ = write!(
+                port,
+                "comandos: help, meminfo, caps, bp, panic, fb, pci, ahci, net, disktest, ls, cat, write\r\n"
+            );
+        }
+        "ls" => {
+            for name in vfs::list() {
+                let _ = write!(port, "{}\r\n", name);
+            }
+        }
+        "cat" => match parts.next() {
+            Some(name) => match vfs::read(name) {
+                Some(data) => {
+                    for byte in data {
+                        port.write_byte(byte);
+                    }
+                    let _ = write!(port, "\r\n");
+                }
+                None => {
+                    let _ = write!(port, "no existe: {}\r\n", name);
+                }
+            },
+            None => {
+                let _ = write!(port, "uso: cat <nombre>\r\n");
+            }
+        },
+        "write" => {
+            let name = parts.next();
+            let text: alloc::vec::Vec<&str> = parts.collect();
+            match name {
+                Some(name) if !text.is_empty() => {
+                    let content = text.join(" ");
+                    vfs::write(name, content.as_bytes());
+                    let _ = write!(port, "escrito: {} ({} bytes)\r\n", name, content.len());
+                }
+                _ => {
+                    let _ = write!(port, "uso: write <nombre> <texto...>\r\n");
+                }
+            }
         }
         "disktest" => {
             match ahci::first_disk() {
