@@ -10,7 +10,7 @@ cd "$ROOT/kernel"
 echo "[1/3] Compilando kernel (nightly + build-std)..."
 cargo build --release
 
-BIN="$ROOT/kernel/target/x86_64-forge/release/forge-kernel"
+BIN="$ROOT/target/x86_64-forge/release/forge-kernel"
 if [ ! -f "$BIN" ]; then
     echo "ERROR: no se generó el binario en $BIN"
     exit 1

@@ -1,6 +1,7 @@
 [unstable]
 build-std = ["core", "alloc", "compiler_builtins"]
 build-std-features = ["compiler-builtins-mem"]
+json-target-spec = true
 
 [build]
 target = "../targets/x86_64-forge.json"

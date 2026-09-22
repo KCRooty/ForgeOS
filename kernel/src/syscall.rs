@@ -94,9 +94,9 @@ pub fn init() {
 /// variable global — no es reentrante ni SMP-safe. Válido mientras solo
 /// haya una syscall en vuelo a la vez (nuestro caso actual, sin
 /// preemption ni multi-core todavía).
-#[naked]
+#[unsafe(naked)]
 pub unsafe extern "C" fn syscall_entry() {
-    core::arch::asm!(
+    core::arch::naked_asm!(
         "mov [{user_rsp}], rsp",
         "mov rsp, [{stack_top}]",
         "push rcx", // RIP de retorno a ring 3, puesto por `syscall`
@@ -126,7 +126,6 @@ pub unsafe extern "C" fn syscall_entry() {
         user_rsp = sym USER_RSP_SCRATCH,
         stack_top = sym SYSCALL_STACK_TOP,
         handler = sym syscall_dispatch,
-        options(noreturn)
     );
 }
 
