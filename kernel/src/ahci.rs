@@ -1,5 +1,5 @@
 //! Driver AHCI (SATA) — detección e inicialización mínima (BORRADOR SIN
-//! VERIFICAR).
+//! VERIFICAR EN QEMU — pero registros contrastados contra fuente real).
 //!
 //! Alcance de esta pasada: encontrar el controlador AHCI por PCI,
 //! mapear su ABAR, habilitar modo AHCI, leer qué puertos están
@@ -9,11 +9,14 @@
 //! registros y más riesgo de un offset mal puesto. Se deja para una
 //! pasada dedicada aparte, no mezclada con esta.
 //!
-//! ADVERTENCIA: la tabla de offsets de registros AHCI de abajo es la
-//! parte más sensible de este fichero — sacada de memoria contra la
-//! estructura estándar de la spec AHCI 1.3 (ampliamente documentada en
-//! osdev), sin poder contrastarla contra la spec oficial ni hardware
-//! real. Si algo falla aquí, es el primer sitio a revisar.
+//! VERIFICADO: la tabla de offsets de registros de abajo se contrastó
+//! contra `drivers/ata/ahci.h` del kernel de Linux real (GPL-2.0,
+//! github.com/torvalds/linux) — HOST_CAP=0x00, HOST_CTL=0x04,
+//! HOST_PORTS_IMPL=0x0c, PORT_SCR_STAT=0x28, PORT_SIG=0x24, base de
+//! puerto = mmio+0x100+(n*0x80), fórmula de nº de puertos = (cap&0x1f)+1
+//! — todos coinciden exactamente. Sigue sin ejecutarse en QEMU, pero ya
+//! no es "memoria sin contrastar", es "offsets confirmados, lógica de
+//! Rust por verificar".
 
 use crate::pci::{self, PciDevice};
 use crate::serial_println;

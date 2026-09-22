@@ -9,6 +9,12 @@ parcialmente funcional, y desbloquea de golpe: Steam, la mayoría del
 software Electron (Discord, Spotify), y cualquier binario Linux que no
 dependa de systemd/D-Bus/cgroups en profundidad.
 
+**Precedente adicional, de 30+ años:** NT hace exactamente esto —
+Executive agnóstico de API + Win32 como servidor de subsistema en
+espacio de usuario (`subsystems/csr` + `subsystems/win` en el código
+real de ReactOS, clean-room de NT). No es una idea nuestra rara, es un
+patrón arquitectónico probado repetidamente. Ver `ARCHITECTURE.md`.
+
 ### Prerrequisitos reales (por orden de bloqueo)
 
 1. **Superficie de syscalls Linux mucho más completa** — hoy tenemos ~9

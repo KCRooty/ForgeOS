@@ -1,5 +1,5 @@
 //! Driver RTL8139 (Ethernet) — detección + lectura de MAC (BORRADOR SIN
-//! VERIFICAR).
+//! VERIFICAR EN QEMU — pero registros contrastados contra fuente real).
 //!
 //! Alcance de esta pasada: encontrar el chip por PCI, despertarlo,
 //! hacerle un soft reset, y leer su dirección MAC de fábrica. TX/RX
@@ -7,6 +7,11 @@
 //! descriptores de transmisión — memoria DMA que además debería salir
 //! de nuestro allocador físico (`pmm.rs`), no de un buffer estático.
 //! Pasada dedicada aparte, no mezclada con esta.
+//!
+//! VERIFICADO: registros contrastados contra `drivers/net/ethernet/
+//! realtek/8139too.c` del kernel de Linux real (GPL-2.0,
+//! github.com/torvalds/linux) — MAC0=0x00, Config1=0x52, ChipCmd=0x37,
+//! CmdReset=0x10 — todos coinciden exactamente.
 
 use crate::pci::{self, PciDevice};
 use crate::serial_println;

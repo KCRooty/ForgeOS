@@ -151,9 +151,14 @@ Todo lo demás falta. Esto es el inventario completo, no una selección.
 - ❌ **Syscalls de ventana** — diseño propio tipo `SYS_WIN_CREATE`/
   `PRESENT`/`POLL_EVENT` (referencia: nyxos-dev)
 - ❌ **Cursor de ratón** — renderizado, no solo posición
-- ❌ **Fuente proporcional real** — el 8x8 de bloque actual es solo
-  para debug; hace falta algo tipo TTF más adelante (como hizo
-  nyxos-dev con DejaVu Sans) o al menos completar el alfabeto bitmap
+- ✅ **Fuente de consola real** *borrador sin verificar* — parser PSF1
+  (`psf.rs`) resuelve "completar el alfabeto bitmap" con una fuente
+  real, no más glifos hechos a mano. **Pendiente:** el fichero
+  `kernel/assets/font.psf` en sí (instrucciones en
+  `kernel/assets/README.md`)
+- ❌ **Fuente proporcional real tipo TTF** — PSF1 es monoespaciada de
+  consola, suficiente para debug/terminal; TTF de verdad (como hizo
+  nyxos-dev con DejaVu Sans) sigue siendo aspiración de Anvil/M6+
 - ❌ **Portapapeles** (clipboard)
 
 ## 8. Apps (todas viven dentro de Anvil, M6+)
