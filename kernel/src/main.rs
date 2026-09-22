@@ -26,6 +26,7 @@ mod pci;
 mod pic;
 mod pipe;
 mod pmm;
+mod process;
 mod psf;
 mod ring3;
 mod rtl8139;
@@ -233,11 +234,11 @@ pub extern "C" fn kernel_main_upper(mb2_info_ptr: u64) -> ! {
     match elf::load(&elf::TEST_ELF) {
         Ok(loaded) => {
             serial_println!(
-                "[elf] cargado OK — entry=0x{:x} (esperado 0x400078), PML4=0x{:x}",
+                "[elf] cargado OK — entry=0x{:x} (esperado 0xa000000078), PML4=0x{:x}",
                 loaded.entry_point,
                 loaded.page_table
             );
-            if loaded.entry_point == 0x400078 {
+            if loaded.entry_point == 0xa000000078 {
                 serial_println!("[elf] entry point coincide con lo calculado a mano — parseo correcto");
             }
         }
