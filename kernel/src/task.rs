@@ -59,6 +59,10 @@ pub struct Task {
     pub id: u64,
     pub context: Context,
     pub state: TaskState,
+    /// 0 = comparte el espacio de direcciones activo (hilo de kernel
+    /// normal, M4a). Distinto de 0 = PML4 propio (proceso real, M4d) —
+    /// el scheduler cambia CR3 a esto al entrarle el turno.
+    pub page_table: u64,
     // guardamos el Box para que el kernel heap no libere la pila
     // mientras la tarea exista. `None` para la tarea "placeholder" que
     // representa un flujo de ejecución que YA estaba corriendo (el
@@ -98,6 +102,7 @@ impl Task {
             id,
             context,
             state: TaskState::Ready,
+            page_table: 0,
             _stack: Some(stack),
         }
     }
@@ -110,6 +115,7 @@ impl Task {
             id,
             context: Context::zero(),
             state: TaskState::Running,
+            page_table: 0,
             _stack: None,
         }
     }

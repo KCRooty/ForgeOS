@@ -54,6 +54,12 @@ Todo lo demás falta. Esto es el inventario completo, no una selección.
   vincular `Capabilities`, estado de proceso completo, etc.)
 - ❌ **Scheduler** — round-robin como mínimo, weighted más adelante
 - ❌ **Context switch** — guardar/restaurar registros, FPU/SSE state
+- ✅ **Espacios de direcciones por proceso (M4d)** *borrador sin
+  verificar* — `mmu::create_address_space` (PML4 propio, comparte
+  kernel vía P4[0]), `mmu::map_page_in` (mapeo en un espacio no
+  activo), scheduler cambia CR3 en Rust seguro al entrarle el turno a
+  una tarea con espacio propio. Probado creando un espacio, mapeando
+  algo privado en él, y cambiando CR3 de verdad.
 - ❌ **fork() / execve() reales** — con carga de ELF64 propio
 - ❌ **wait()/exit()** — recolección de procesos zombie
 - ❌ **Señales** (signals) — al menos SIGKILL/SIGTERM/SIGSEGV
