@@ -5,6 +5,7 @@
 #![no_std]
 #![no_main]
 
+mod caps;
 mod serial;
 
 use core::panic::PanicInfo;
@@ -24,10 +25,43 @@ pub extern "C" fn kernel_main_upper(mb2_info_ptr: u64) -> ! {
     serial_println!("Multiboot2 info @ 0x{:x}", mb2_info_ptr);
     serial_println!("Ring 0, Long Mode, paginación identity-map activa.");
 
-    // TODO M1: GDT/TSS propias, IDT + excepciones, PIC/APIC
-    // TODO M2: allocator físico, heap del kernel
+    // M1 — demo del modelo de capabilities. Todavía no hay tabla de
+    // procesos (eso es M4), así que probamos el mecanismo con un único
+    // objeto de prueba: nace sin restricciones, se pledgea a un
+    // subconjunto mínimo, y verificamos que el enforcement funciona en
+    // ambos sentidos (permite lo pledgeado, deniega lo demás).
+    let mut proc_caps = caps::Capabilities::unrestricted();
+    proc_caps
+        .pledge(caps::CAP_STDIO | caps::CAP_FS_READ)
+        .expect("pledge inicial desde unrestricted no debería fallar nunca");
+    serial_println!("[caps] pledge: CAP_STDIO | CAP_FS_READ");
+
+    match proc_caps.enforce(caps::CAP_STDIO) {
+        Ok(()) => serial_println!("[caps] STDIO -> permitido (correcto)"),
+        Err(_) => serial_println!("[caps] STDIO -> denegado (¡ERROR, no debería pasar!)"),
+    }
+
+    match proc_caps.enforce(caps::CAP_NET) {
+        Ok(()) => serial_println!("[caps] NET -> permitido (¡ERROR, no debería pasar!)"),
+        Err(v) => serial_println!(
+            "[caps] NET -> denegado (correcto — pedido=0x{:x}, otorgado=0x{:x})",
+            v.requested,
+            v.granted
+        ),
+    }
+
+    // Intentar ampliar después de pledgear debe fallar siempre — es la
+    // garantía central del modelo (principio 1 de PHILOSOPHY.md).
+    match proc_caps.pledge(caps::CAP_STDIO | caps::CAP_FS_READ | caps::CAP_NET) {
+        Ok(()) => serial_println!("[caps] ampliar pledge -> permitido (¡ERROR, no debería pasar!)"),
+        Err(_) => serial_println!("[caps] ampliar pledge -> denegado (correcto, es irreversible)"),
+    }
+
+    // TODO M1b: GDT/TSS propias, IDT + excepciones, PIC/APIC
+    // TODO M2: allocador físico, heap del kernel, dispatcher de syscalls
+    //          real (aquí `caps::enforce` pasa a llamarse por cada syscall)
     // TODO M3: framebuffer (Multiboot2 tag de vídeo) + texto en pantalla
-    // TODO M4: scheduler cooperativo mínimo
+    // TODO M4: scheduler + tabla de procesos, cada uno con su Capabilities
 
     loop {
         unsafe { core::arch::asm!("hlt") };
