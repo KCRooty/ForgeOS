@@ -9,6 +9,7 @@
 mod caps;
 mod gdt;
 mod idt;
+mod pic;
 mod serial;
 
 use core::panic::PanicInfo;
@@ -32,6 +33,9 @@ pub extern "C" fn kernel_main_upper(mb2_info_ptr: u64) -> ! {
     gdt::init();
     serial_println!("[gdt] cargada, TSS con pila IST para double fault");
     idt::init();
+
+    pic::init();
+    serial_println!("[pic] remapeado a vectores 32-47, todo enmascarado (sin drivers de IRQ aún)");
 
     // Prueba end-to-end: disparamos un breakpoint por software (#BP) y
     // comprobamos que el handler se ejecuta y la CPU sigue viva después.
@@ -71,7 +75,6 @@ pub extern "C" fn kernel_main_upper(mb2_info_ptr: u64) -> ! {
         Err(_) => serial_println!("[caps] ampliar pledge -> denegado (correcto, es irreversible)"),
     }
 
-    // TODO M1c: PIC 8259 remapeado (evitar colisión IRQ vs excepciones CPU)
     // TODO M2: allocador físico, heap del kernel, dispatcher de syscalls
     //          real (aquí `caps::enforce` pasa a llamarse por cada syscall)
     // TODO M3: framebuffer (Multiboot2 tag de vídeo) + texto en pantalla
