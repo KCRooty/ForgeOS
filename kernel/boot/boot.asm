@@ -15,7 +15,22 @@ mb2_header_start:
     dd 0                         ; arquitectura: i386 protected mode
     dd mb2_header_end - mb2_header_start
     dd -(0xE85250D6 + 0 + (mb2_header_end - mb2_header_start))
+
+    ; tag de framebuffer (type=5): le pedimos a GRUB un framebuffer
+    ; lineal de 1024x768 @ 32bpp. Sin esto, el tag de framebuffer podría
+    ; no aparecer en la info que nos devuelve al arrancar.
+    align 8
+    tag_fb_start:
+    dw 5                          ; type = framebuffer
+    dw 0                          ; flags: 0 = obligatorio
+    dd tag_fb_end - tag_fb_start  ; size
+    dd 1024                       ; width
+    dd 768                        ; height
+    dd 32                         ; depth (bpp)
+    tag_fb_end:
+
     ; tag final
+    align 8
     dw 0
     dw 0
     dd 8
