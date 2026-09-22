@@ -1,6 +1,49 @@
 # Compatibilidad de aplicaciones y firmware abierto
 
-## La decisión de ingeniería: una capa, no N ports
+## Estrategia preferida: **port nativo**, no capa de compatibilidad
+
+Precedente directo y reciente: **BoredOS** (github.com/BoredOS/BoredOS,
+GPL-3.0, x86-64 UNIX-like en C). Su propio README lo describe así: no es
+completamente POSIX-compatible, así que el software necesita algo de
+trabajo de porting, pero *para la mayoría de programas los cambios son
+menores*. Con eso han portado DOOM, TinyGL, TCC, Lua, kilo, kirc y tvi.
+
+**Esta es la vía preferida para Forge OS.** Es la que da software
+corriendo de verdad *nativamente*, sin emulación ni capas de traducción
+— que es el punto de tener un OS propio.
+
+### Las dos piezas que lo hacen viable
+
+1. **mlibc** — libc diseñada explícitamente para OSes nuevos, con capa
+   de abstracción por sistema (la usa BoredOS). Portarla, en vez de
+   escribir nuestra propia libc desde cero, es lo que convierte "portar
+   software" de meses de trabajo por programa a "cambios menores".
+   Cambia por completo el cálculo de la sección 6 de `TODO.md`.
+2. **TinyGL** — subconjunto de OpenGL renderizado **por software**.
+   Permite 3D real sin driver de GPU, desbloqueando la parte gráfica
+   mucho antes que el roadmap de HAL de `ARCHITECTURE.md`.
+
+### Qué SÍ se puede portar nativamente
+
+Software open source, autocontenido y portable: DOOM y otros juegos con
+fuente liberada, compiladores pequeños (TCC), intérpretes (Lua,
+probablemente Python), editores, clientes de red simples, herramientas
+CLI. Es una lista larga y genuinamente útil.
+
+### Qué NO se puede portar, por mucho que se quiera
+
+- **Discord, Spotify, Steam (cliente), Claude Code**: binarios cerrados
+  o dependientes de Electron/Node completo. No hay fuente que portar.
+- **Navegadores reales (Chromium/Firefox)**: la fuente existe, pero son
+  el software más complejo del mundo — millones de líneas asumiendo
+  infraestructura completa de sistema operativo. Ni BoredOS lo intenta.
+- **YouTube**: consecuencia directa de lo anterior.
+
+Para estos, la única vía sería una capa de compatibilidad Linux (ver
+abajo) — proyecto del tamaño del kernel entero, y con resultados
+parciales incluso en FreeBSD, que lleva 30 años en ello.
+
+## La otra vía: una capa, no N ports
 
 No se portea cada app suelta. Se construye **una capa de compatibilidad
 con la ABI de Linux** — un "Linuxulator" propio. Es la estrategia

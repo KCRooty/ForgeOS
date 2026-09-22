@@ -131,8 +131,11 @@ Todo lo demás falta. Esto es el inventario completo, no una selección.
 ## 6. Userland, toolchain y shell
 
 - ❌ **crt0** — arranque de proceso userland, `argv`/`envp`
-- ❌ **libc propia** — malloc/free, `str*`/`mem*`, printf/snprintf,
-  stdio con buffer, ctype
+- ❌ **libc** — **decisión revisada:** en vez de escribir la nuestra
+  desde cero, portar **mlibc** (libc pensada para OSes nuevos, con capa
+  de abstracción por sistema; es lo que usa BoredOS). Convierte portar
+  software de "meses por programa" a "cambios menores". Ver
+  `COMPATIBILITY.md`
 - ❌ **~50-60 coreutils** — `ls`, `cat`, `cp`, `mv`, `rm`, `ps`, `top`,
   etc. (referencia directa: los coreutils de nyxos-dev)
 - ❌ **Bellows** (el shell real, M4+) — pipelines, redirección, job
@@ -244,7 +247,17 @@ tablero. Sin procesos reales no hay shell real, no hay apps, no hay
 gestor de paquetes, no hay nada que "corra" de verdad más allá de lo que
 ya hace el propio kernel.
 
-## Meta de integración concreta: yt-dlp
+## Metas de integración concretas
+
+### DOOM (meta intermedia, más cercana)
+
+Precedente directo: BoredOS lo consiguió con doomgeneric + TinyGL.
+Necesita: M4c (procesos) → M5 (VFS) → mlibc portada → framebuffer (ya
+lo tenemos) + entrada de teclado (ya lo tenemos). **No necesita red, ni
+GPU, ni TLS** — es una meta bastante más cercana que yt-dlp y prueba
+que el userland funciona de verdad.
+
+### yt-dlp (meta mayor)
 
 Un objetivo tangible para saber cuándo el sistema esencial está sólido:
 que `yt-dlp` corra de verdad en Forge OS. No necesita GPU, motor de
