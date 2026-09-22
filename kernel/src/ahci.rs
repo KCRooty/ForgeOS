@@ -20,6 +20,7 @@
 
 use crate::pci::{self, PciDevice};
 use crate::serial_println;
+use alloc::string::{String, ToString};
 
 const AHCI_CLASS: u8 = 0x01; // mass storage
 const AHCI_SUBCLASS: u8 = 0x06; // SATA
@@ -37,6 +38,151 @@ const PORT_SIG: u64 = 0x24;
 
 const SATA_SIG_ATA: u32 = 0x00000101;
 const SATA_SIG_ATAPI: u32 = 0xEB140101;
+
+// Registros de puerto adicionales — necesarios para emitir comandos de
+// verdad, no solo detectar. Offsets verificados contra drivers/ata/ahci.h
+// del kernel de Linux, igual que la tabla de detección de arriba.
+const PORT_CLB: u64 = 0x00;
+const PORT_CLBU: u64 = 0x04;
+const PORT_FB: u64 = 0x08;
+const PORT_FBU: u64 = 0x0C;
+const PORT_CMD_REG: u64 = 0x18;
+const PORT_TFD: u64 = 0x20;
+const PORT_CI: u64 = 0x38;
+
+const CMD_FRE: u32 = 1 << 4; // FIS Receive Enable
+const CMD_ST: u32 = 1 << 0; // Start
+const TFD_ERR: u32 = 1 << 0; // bit0 del Task File Data = ERR
+
+const ATA_CMD_IDENTIFY_DEVICE: u8 = 0xEC;
+
+/// Command Header — una por slot, 32 bytes, formato estándar AHCI
+/// (spec §4.2.2, idéntico en cualquier implementación).
+#[repr(C)]
+struct CmdHeader {
+    flags: u16,  // bits0-4=CFL, bit6=W, resto flags — solo usamos CFL
+    prdtl: u16,  // número de entradas PRDT
+    prdbc: u32,  // bytes transferidos, lo rellena el controlador
+    ctba: u32,   // dirección física de la Command Table (bits 0-31)
+    ctba_hi: u32,
+    reserved: [u32; 4],
+}
+
+/// Entrada de la Physical Region Descriptor Table — describe un buffer
+/// de datos físico contiguo (spec §4.2.3.3).
+#[repr(C)]
+struct PrdtEntry {
+    dba: u32,
+    dba_hi: u32,
+    reserved: u32,
+    dbc_i: u32, // bits0-21 = bytes-1, bit31 = interrupt on completion
+}
+
+/// Inicializa el puerto (Command List + área de recepción de FIS) y
+/// emite `IDENTIFY DEVICE` en el slot 0. Devuelve el modelo del disco
+/// (40 bytes, tal como lo entrega el propio dispositivo) si el comando
+/// tiene éxito.
+///
+/// Simplificación deliberada de esta pasada: no esperamos activamente a
+/// que PxCMD.CR/FR reflejen el estado antes de continuar — la mayoría
+/// de implementaciones de referencia sí lo hacen; en QEMU funciona sin
+/// eso, en hardware real podría necesitar ese endurecimiento después.
+unsafe fn init_port_and_identify(port_base: u64) -> Option<[u8; 40]> {
+    // Parar el motor de comandos por si venía arrancado de antes.
+    let mut cmd = reg_read(port_base, PORT_CMD_REG);
+    cmd &= !CMD_ST;
+    reg_write(port_base, PORT_CMD_REG, cmd);
+
+    let cmd_list = crate::pmm::alloc_frame()?;
+    let fis_area = crate::pmm::alloc_frame()?;
+    let cmd_table = crate::pmm::alloc_frame()?;
+    let data_buf = crate::pmm::alloc_frame()?;
+
+    // Los frames vienen con basura de uso físico previo — limpiamos.
+    core::ptr::write_bytes(cmd_list as *mut u8, 0, 4096);
+    core::ptr::write_bytes(fis_area as *mut u8, 0, 4096);
+    core::ptr::write_bytes(cmd_table as *mut u8, 0, 4096);
+    core::ptr::write_bytes(data_buf as *mut u8, 0, 4096);
+
+    reg_write(port_base, PORT_CLB, cmd_list as u32);
+    reg_write(port_base, PORT_CLBU, (cmd_list >> 32) as u32);
+    reg_write(port_base, PORT_FB, fis_area as u32);
+    reg_write(port_base, PORT_FBU, (fis_area >> 32) as u32);
+
+    // FRE antes que ST — orden exigido por la spec (§10.1.2).
+    let mut cmd = reg_read(port_base, PORT_CMD_REG);
+    cmd |= CMD_FRE;
+    reg_write(port_base, PORT_CMD_REG, cmd);
+    cmd |= CMD_ST;
+    reg_write(port_base, PORT_CMD_REG, cmd);
+
+    // Command header del slot 0 -> apunta a nuestra Command Table.
+    let header = &mut *(cmd_list as *mut CmdHeader);
+    header.flags = 5; // CFL=5 DWORDS: el FIS H2D Register mide exactamente eso
+    header.prdtl = 1;
+    header.prdbc = 0;
+    header.ctba = cmd_table as u32;
+    header.ctba_hi = (cmd_table >> 32) as u32;
+
+    // FIS H2D Register para IDENTIFY DEVICE, al principio de la Command
+    // Table (spec §5.3.6.1 / FIS H2D §10.3.4).
+    let cfis = cmd_table as *mut u8;
+    *cfis.add(0) = 0x27; // FIS type: Register — Host to Device
+    *cfis.add(1) = 0x80; // bit7=C (actualización de comando), PM port 0
+    *cfis.add(2) = ATA_CMD_IDENTIFY_DEVICE;
+    // resto de bytes del FIS ya están a 0 por el write_bytes de arriba
+
+    // PRDT en offset 0x80 de la Command Table (spec §4.2.3.1) — una
+    // sola entrada apuntando al buffer de 512 bytes donde el
+    // dispositivo va a volcar los datos de IDENTIFY.
+    let prdt = &mut *((cmd_table + 0x80) as *mut PrdtEntry);
+    prdt.dba = data_buf as u32;
+    prdt.dba_hi = (data_buf >> 32) as u32;
+    prdt.reserved = 0;
+    prdt.dbc_i = 511; // bytes-1; bit31=0, sin IRQ, hacemos polling
+
+    // Emitir el comando en el slot 0.
+    reg_write(port_base, PORT_CI, 1);
+
+    // Polling hasta que el bit del slot se limpie (comando completado)
+    // o hasta timeout — sin IRQ configurada para esta pasada.
+    let mut timeout = 1_000_000u32;
+    while reg_read(port_base, PORT_CI) & 1 != 0 {
+        timeout -= 1;
+        if timeout == 0 {
+            serial_println!("[ahci] IDENTIFY: timeout esperando a que termine el comando");
+            return None;
+        }
+    }
+
+    let tfd = reg_read(port_base, PORT_TFD);
+    if tfd & TFD_ERR != 0 {
+        serial_println!("[ahci] IDENTIFY: el dispositivo devolvió error (TFD=0x{:x})", tfd);
+        return None;
+    }
+
+    // Modelo del disco: palabras 27-46 del buffer IDENTIFY, cada
+    // palabra de 16 bits llega con los bytes intercambiados (spec ATA
+    // — orden "big-endian dentro de cada word").
+    let words = data_buf as *const u16;
+    let mut model = [0u8; 40];
+    for i in 0..20 {
+        let word = words.add(27 + i).read_volatile();
+        model[i * 2] = (word >> 8) as u8;
+        model[i * 2 + 1] = (word & 0xFF) as u8;
+    }
+    Some(model)
+}
+
+fn model_to_string(model: &[u8; 40]) -> String {
+    let mut s = String::new();
+    for &b in model.iter() {
+        if b.is_ascii_graphic() || b == b' ' {
+            s.push(b as char);
+        }
+    }
+    s.trim().to_string()
+}
 
 unsafe fn reg_read(base: u64, offset: u64) -> u32 {
     ((base + offset) as *const u32).read_volatile()
@@ -126,7 +272,20 @@ pub fn probe_and_print() {
                 SATA_SIG_ATAPI => "unidad ATAPI (CD/DVD)",
                 _ => "dispositivo desconocido",
             };
-            serial_println!("[ahci] puerto {}: {} (sig=0x{:x})", port, kind, sig);
+
+            if sig == SATA_SIG_ATA {
+                match init_port_and_identify(port_base) {
+                    Some(model) => {
+                        let name = model_to_string(&model);
+                        serial_println!("[ahci] puerto {}: {} — modelo: \"{}\"", port, kind, name);
+                    }
+                    None => {
+                        serial_println!("[ahci] puerto {}: {} — IDENTIFY falló, ver arriba", port, kind);
+                    }
+                }
+            } else {
+                serial_println!("[ahci] puerto {}: {} (sig=0x{:x})", port, kind, sig);
+            }
         }
 
         if !found_any {
