@@ -12,7 +12,7 @@ Ver [docs/PHILOSOPHY.md](docs/PHILOSOPHY.md) (diseño técnico) y
 [docs/PRODUCT.md](docs/PRODUCT.md) (a quién sirve y por qué) para el
 razonamiento completo detrás de cada decisión.
 
-## Estado: M4c — gestor de memoria virtual real (map_page/unmap_page), sin verificar en QEMU (en construcción)
+## Estado: M4d — procesos con espacio de direcciones propio (PML4 real, CR3 cambia de verdad), sin verificar en QEMU (en construcción)
 
 ## Referencias de arquitectura estudiadas
 - Asmodeus14/Nyx (Rust, QCLang, motor 3D Gen9.5 hand-rolled)
