@@ -193,3 +193,13 @@ Casi todo lo de las secciones 2-9 depende, directa o indirectamente, de
 tablero. Sin procesos reales no hay shell real, no hay apps, no hay
 gestor de paquetes, no hay nada que "corra" de verdad más allá de lo que
 ya hace el propio kernel.
+
+## Meta de integración concreta: yt-dlp
+
+Un objetivo tangible para saber cuándo el sistema esencial está sólido:
+que `yt-dlp` corra de verdad en Forge OS. No necesita GPU, motor de
+navegador, ni sandboxing complejo — pero sí toca casi toda la pila
+esencial de golpe: M4 completo (procesos reales) → M5 (VFS/filesystem) →
+stack de red completo con TLS → Python portado (ver `LANGUAGES.md`) →
+ffmpeg opcional para calidad completa. El día que esto corra, es la señal
+de que el sistema base funciona de punta a punta.
