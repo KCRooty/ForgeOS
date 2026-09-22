@@ -25,6 +25,34 @@ const PAGE_HUGE: u64 = 1 << 7;
 const PAGE_NO_EXECUTE: u64 = 1 << 63;
 const ADDR_MASK: u64 = 0x000F_FFFF_FFFF_F000;
 
+const IA32_EFER: u32 = 0xC000_0080;
+const EFER_NXE: u64 = 1 << 11;
+
+unsafe fn read_msr(msr: u32) -> u64 {
+    let lo: u32;
+    let hi: u32;
+    core::arch::asm!("rdmsr", in("ecx") msr, out("eax") lo, out("edx") hi, options(nomem, nostack));
+    ((hi as u64) << 32) | (lo as u64)
+}
+
+unsafe fn write_msr(msr: u32, value: u64) {
+    let lo = value as u32;
+    let hi = (value >> 32) as u32;
+    core::arch::asm!("wrmsr", in("ecx") msr, in("eax") lo, in("edx") hi, options(nomem, nostack));
+}
+
+/// Habilita `EFER.NXE`. Imprescindible antes de mapear cualquier página
+/// con `PAGE_NO_EXECUTE` (bit 63): sin `NXE=1` ese bit es "reservado" a
+/// ojos de la CPU, y cualquier acceso a una entrada que lo tenga puesto
+/// hace page fault con el bit RSVD del error code activo (visto en
+/// `main.rs`: `map_page(..., executable=false)` fallaba así en la
+/// primera prueba real de M4c). Idempotente — se puede llamar más de
+/// una vez sin problema.
+pub unsafe fn init() {
+    let efer = read_msr(IA32_EFER);
+    write_msr(IA32_EFER, efer | EFER_NXE);
+}
+
 unsafe fn read_cr3() -> u64 {
     let val: u64;
     core::arch::asm!("mov {}, cr3", out(reg) val, options(nomem, nostack));
