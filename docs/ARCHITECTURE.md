@@ -15,6 +15,36 @@ Migrar a higher-half real es tarea futura, deliberadamente pospuesta hasta
 tener un ciclo de compilación+QEMU real para validar el mapeo de páginas
 adicional sin adivinar aritmética de bits a ciegas.
 
+## Verificación de registros contra fuente real
+
+Desde AHCI/RTL8139: antes de comprometerse a una tabla de offsets de
+registros de hardware "sacada de memoria", se busca la fuente real
+(típicamente el driver correspondiente en `drivers/` del kernel de
+Linux — GPL-2.0, público) y se contrasta. No se copia el código —
+Linux usa su propio modelo de driver, no encaja aquí — pero los
+offsets de registro son hechos de hardware, no opiniones de diseño, y
+verificarlos así convierte "borrador sin verificar, riesgo alto" en
+"offsets confirmados, solo la lógica de Rust por verificar". Práctica
+a repetir en cada driver nuevo que toque registros de hardware.
+
+## Precedente real: NT separa Executive de "personalidad" de subsistema
+
+Confirmado explorando la estructura real de ReactOS (clean-room de NT):
+`ntoskrnl/` tiene subcarpetas `ob/` (Object Manager), `mm/` (memoria),
+`ke/` (kernel), `io/` (I/O Manager), `ps/` (procesos), `se/`
+(seguridad), `lpc/` (IPC) — exactamente los nombres de componente que ya
+planteábamos para nuestro Executive, no una idea abstracta nuestra.
+
+Más importante: `subsystems/csr/` + `subsystems/win/` — el Executive de
+NT es **agnóstico de API**. Win32 no vive dentro del kernel, corre como
+servidor de subsistema en espacio de usuario encima de un Executive
+genérico (históricamente NT también soportó personalidades POSIX y
+OS/2 así, en paralelo). Es precedente real de 30+ años del mismo patrón
+que planteamos en `COMPATIBILITY.md` para la futura capa de
+compatibilidad Linux: un Executive propio, agnóstico, con "Bellows +
+Anvil" como nuestra personalidad nativa y un futuro servidor de
+subsistema Linux-compatible corriendo al lado, no dentro del kernel.
+
 ## Las tres capas
 
 **Kernel** (`kernel/src/`, módulos base) — scheduler, interrupciones, locks,
