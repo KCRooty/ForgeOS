@@ -7,13 +7,25 @@ nadie, e implementada desde cero en Rust.
 
 ## Los seis principios
 
-### 1. Seguro por defecto, no por parche — *(OpenBSD)*
+### 1. Seguro por defecto, no por parche — *(OpenBSD + FreeBSD)*
 Deny-first en todo. Un proceso declara una única vez, al arrancar, qué
 categorías de syscall necesita (`pledge()`-style). El kernel congela esa
 máscara para toda su vida: pedir algo fuera de lista es `EPERM` permanente,
 sin excepciones, sin "ampliar permisos más tarde". Añadir seguridad después
 de escribir la feature es lo que produce CVEs; declararla como precondición
 la hace estructuralmente imposible.
+
+Complementado con dos ideas más allá de lo que ya teníamos:
+- **Capsicum** (FreeBSD) — capabilities por *file descriptor individual*,
+  más finas que las categorías de `caps.rs`. Un proceso en "modo
+  capability" no puede abrir rutas absolutas nuevas, solo operar sobre
+  los fds que ya tiene. Objetivo futuro que afina el modelo, no lo
+  sustituye.
+- **privsep** (OpenBSD, usado en OpenSSH y su propio `httpd`) — patrón
+  arquitectónico para cualquier demonio del sistema: partir el servicio
+  en un proceso sin privilegios (trabajo real) + un supervisor mínimo con
+  privilegios, comunicados por un canal estrecho y auditable. Forma
+  estándar de construir servicios en Forge OS a partir de ahora.
 
 ### 2. Rápido porque es simple — *(Linux)*
 Kernel monolítico. Syscalls directas vía `syscall`/`sysret`, sin capas de
