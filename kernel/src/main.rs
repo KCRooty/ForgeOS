@@ -29,6 +29,7 @@ mod pmm;
 mod psf;
 mod ring3;
 mod rtl8139;
+mod syscall;
 mod vfs;
 mod scheduler;
 mod serial;
@@ -264,6 +265,10 @@ pub extern "C" fn kernel_main_upper(mb2_info_ptr: u64) -> ! {
     // TODO M4c: espacios de direcciones por tarea (necesita gestor de
     //           memoria virtual real, ver TODO.md §1) — de ahí a fork/exec
     // TODO M6+: Anvil + terminal ("Crucible")
+
+    // M4g — mecanismo syscall/sysret listo (MSRs configuradas). El
+    // comando `synccalltest` de la consola lo ejercita de verdad.
+    syscall::init();
 
     serial_println!("");
     serial_println!("Boot completo — entrando en la consola de depuración.");
