@@ -10,6 +10,7 @@
 extern crate alloc;
 
 mod caps;
+mod console;
 mod gdt;
 mod heap;
 mod idt;
@@ -96,9 +97,10 @@ pub extern "C" fn kernel_main_upper(mb2_info_ptr: u64) -> ! {
     // TODO M2c: syscalls reales — aquí `caps::enforce` pasa a llamarse
     //           por cada una
     // TODO M3: framebuffer (Multiboot2 tag de vídeo) + texto en pantalla
-    // TODO M4: scheduler + tabla de procesos, cada uno con su Capabilities
+    // TODO M4: scheduler + tabla de procesos; shell real ("Bellows")
+    // TODO M6+: Anvil + terminal ("Crucible")
 
-    loop {
-        unsafe { core::arch::asm!("hlt") };
-    }
+    serial_println!("");
+    serial_println!("Boot completo — entrando en la consola de depuración.");
+    console::run()
 }
