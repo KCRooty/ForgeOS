@@ -12,7 +12,7 @@ Ver [docs/PHILOSOPHY.md](docs/PHILOSOPHY.md) (diseño técnico) y
 [docs/PRODUCT.md](docs/PRODUCT.md) (a quién sirve y por qué) para el
 razonamiento completo detrás de cada decisión.
 
-## Estado: teclado PS/2 (US) integrado en la consola junto al puerto serie, sin verificar en QEMU (en construcción)
+## Estado: primeros drivers reales (AHCI + RTL8139, nivel detección), sin verificar en QEMU (en construcción)
 
 ## Referencias de arquitectura estudiadas
 - Asmodeus14/Nyx (Rust, QCLang, motor 3D Gen9.5 hand-rolled)

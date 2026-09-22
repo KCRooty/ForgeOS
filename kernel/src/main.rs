@@ -13,6 +13,7 @@ extern crate alloc;
 mod caps;
 mod console;
 mod apic;
+mod ahci;
 mod font;
 mod framebuffer;
 mod gdt;
@@ -23,6 +24,7 @@ mod mb2;
 mod pci;
 mod pic;
 mod pmm;
+mod rtl8139;
 mod scheduler;
 mod serial;
 mod task;
@@ -144,6 +146,11 @@ pub extern "C" fn kernel_main_upper(mb2_info_ptr: u64) -> ! {
     // ningún driver real (disco, red, audio, GPU) puede encontrar su
     // propio dispositivo.
     pci::scan_and_print();
+
+    // Primeros drivers reales — nivel "detecta y reporta", no
+    // funcionalidad completa todavía (ver cabecera de cada fichero).
+    ahci::probe_and_print();
+    rtl8139::probe_and_print();
 
     // TODO M2b: heap real con free-list (recuperar memoria de dealloc)
     // TODO M2c: syscalls reales — aquí `caps::enforce` pasa a llamarse
