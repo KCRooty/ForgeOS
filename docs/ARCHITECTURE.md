@@ -46,8 +46,9 @@ Categorías actuales (`CapMask`, `u32`, una por bit):
   (`idt.rs`) ✅ *borrador sin verificar* — `#0` divide error, `#3`
   breakpoint, `#6` invalid opcode, `#8` double fault en pila IST separada,
   `#13` GPF, `#14` page fault (con lectura de CR2)
-- **M1c** — PIC 8259 remapeado (mover IRQs de hardware fuera del rango
-  0-31 que usan las excepciones de CPU)
+- **M1c** ✅ *borrador sin verificar* — PIC 8259 remapeado (IRQ0-7 →
+  vectores 32-39, IRQ8-15 → 40-47), todo enmascarado hasta que existan
+  drivers reales que las atiendan
 - **M2** — allocador físico de páginas, heap del kernel, primer dispatcher
   de syscalls real (aquí `caps::enforce` se vuelve operativo)
 - **M3** — framebuffer (tag de vídeo Multiboot2) + texto en pantalla
@@ -55,8 +56,15 @@ Categorías actuales (`CapMask`, `u32`, una por bit):
   Object Manager
 - **M5** — VFS + initramfs
 - **M6+** — HAL de gráficos (fase 0-6 ya detallada en la conversación:
-  framebuffer software → virtio-gpu → Intel real en el Chuwi → AMD → NVIDIA
-  vía firmware GSP → puerto ARM como proyecto hermano)
+  framebuffer software → virtio-gpu → Intel real → AMD → NVIDIA vía
+  firmware GSP → puerto ARM como proyecto hermano)
+
+  > **Nota sobre la fase "Intel real":** QEMU no emula un motor de render
+  > GPU a nivel de registros — solo dispositivos virtuales (virtio-gpu,
+  > Bochs VBE). Esta fase necesita hardware Intel físico de verdad, y de
+  > momento no hay uno asignado (pendiente de si llega un ThinkPad).
+  > Hasta entonces, esta fase queda bloqueada; el resto del roadmap
+  > (framebuffer, virtio-gpu) no depende de ella.
 
 ## Convención de syscalls
 
