@@ -161,3 +161,29 @@ pub fn draw_str(x: u32, y: u32, s: &str, color: u32, scale: u32) {
         cursor_x += crate::font::GLYPH_WIDTH * scale + scale;
     }
 }
+
+/// Igual que draw_char, pero leyendo el glifo de una fuente PSF1 real
+/// en vez de la tabla parcial hecha a mano de font.rs. Alto de glifo
+/// variable (`font.glyph_height`), ancho fijo de 8 píxeles (PSF1).
+pub fn draw_char_psf(font: &crate::psf::PsfFont, x: u32, y: u32, c: u8, color: u32, scale: u32) {
+    let rows = match font.glyph(c) {
+        Some(r) => r,
+        None => return, // carácter fuera de la fuente, no dibujamos nada
+    };
+    for (row, bits) in rows.iter().enumerate() {
+        for col in 0..8u32 {
+            if bits & (0x80 >> col) != 0 {
+                fill_rect(x + col * scale, y + row as u32 * scale, scale, scale, color);
+            }
+        }
+    }
+}
+
+/// Cadena completa con fuente PSF1 real.
+pub fn draw_str_psf(font: &crate::psf::PsfFont, x: u32, y: u32, s: &str, color: u32, scale: u32) {
+    let mut cursor_x = x;
+    for byte in s.bytes() {
+        draw_char_psf(font, cursor_x, y, byte, color, scale);
+        cursor_x += 8 * scale + scale;
+    }
+}

@@ -24,6 +24,7 @@ mod mb2;
 mod pci;
 mod pic;
 mod pmm;
+mod psf;
 mod rtl8139;
 mod scheduler;
 mod serial;
