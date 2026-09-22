@@ -60,15 +60,20 @@ unsafe fn get_or_create_next(table_phys: u64, index: usize, flags: u64) -> Resul
     Ok(new_table)
 }
 
-/// Mapea una página de 4 KiB: `virt` -> `phys`. Ambas deben ir
-/// alineadas a 4 KiB. Falla si ya había algo mapeado en esa dirección
-/// virtual (evita pisar un mapeo existente por accidente).
+/// Mapea una página de 4 KiB: `virt` -> `phys` en el espacio de
+/// direcciones activo (CR3). Ambas deben ir alineadas a 4 KiB.
 pub unsafe fn map_page(virt: u64, phys: u64, writable: bool, executable: bool) -> Result<(), &'static str> {
+    map_page_in(read_cr3(), virt, phys, writable, executable)
+}
+
+/// Igual que `map_page`, pero opera sobre un PML4 explícito en vez de
+/// leer CR3 — necesario para preparar un espacio de direcciones antes
+/// de que esté activo (antes de cambiar CR3 a él).
+pub unsafe fn map_page_in(p4: u64, virt: u64, phys: u64, writable: bool, executable: bool) -> Result<(), &'static str> {
     if virt % 4096 != 0 || phys % 4096 != 0 {
         return Err("virt/phys deben estar alineados a 4 KiB");
     }
 
-    let p4 = read_cr3();
     let inter_flags = PAGE_PRESENT | PAGE_WRITABLE; // tablas intermedias siempre RW
 
     let p3 = get_or_create_next(p4, table_index(virt, 3), inter_flags)?;
@@ -89,8 +94,41 @@ pub unsafe fn map_page(virt: u64, phys: u64, writable: bool, executable: bool) -
     }
     *p1_entry_ptr = (phys & ADDR_MASK) | leaf_flags;
 
-    flush_tlb_entry(virt);
+    // Solo tiene sentido invalidar el TLB si estamos tocando el espacio
+    // de direcciones activo — si `p4` es un espacio todavía no cargado
+    // en CR3, no hay entrada de TLB que invalidar.
+    if p4 == read_cr3() {
+        flush_tlb_entry(virt);
+    }
     Ok(())
+}
+
+/// Crea un espacio de direcciones nuevo (PML4 propio) para un proceso.
+/// Comparte automáticamente el mapeo de kernel/identity ya existente
+/// (copia la entrada P4[0], que cubre los 0-4 GiB identity-mapeados —
+/// kernel, drivers, MMIO) para que las syscalls/interrupciones sigan
+/// funcionando sin importar qué proceso esté activo. El resto de
+/// entradas quedan libres para mapeos privados del proceso.
+pub unsafe fn create_address_space() -> Option<u64> {
+    let new_p4 = pmm::alloc_frame()?;
+    core::ptr::write_bytes(new_p4 as *mut u8, 0, 4096);
+
+    let current_p4 = read_cr3();
+    let shared_entry = *(current_p4 as *const u64);
+    *(new_p4 as *mut u64) = shared_entry;
+
+    Some(new_p4)
+}
+
+/// Cambia el espacio de direcciones activo. `p4` debe ser una
+/// dirección física de una tabla PML4 válida (típicamente devuelta por
+/// `create_address_space`).
+pub unsafe fn switch_address_space(p4: u64) {
+    core::arch::asm!("mov cr3, {}", in(reg) p4, options(nostack));
+}
+
+pub unsafe fn current_address_space() -> u64 {
+    read_cr3()
 }
 
 /// Desmapea una página de 4 KiB previamente mapeada con `map_page`.

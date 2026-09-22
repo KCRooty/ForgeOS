@@ -30,17 +30,27 @@ pub fn init() {
     }
 }
 
-/// Añade una tarea nueva a la cola. No empieza a correr hasta que le
-/// toque turno por `yield_now()`.
-pub fn spawn(entry: fn() -> !) -> u64 {
+/// Añade una tarea nueva a la cola, con espacio de direcciones propio.
+/// `page_table` = 0 para un hilo de kernel normal (comparte el espacio
+/// activo, como `spawn`); distinto de 0 para un proceso con su propio
+/// PML4 (creado con `mmu::create_address_space`).
+pub fn spawn_with_space(entry: fn() -> !, page_table: u64) -> u64 {
     unsafe {
         let sched = (*SCHEDULER.0.get())
             .as_mut()
-            .expect("scheduler::spawn llamado antes de scheduler::init");
+            .expect("scheduler::spawn_with_space llamado antes de scheduler::init");
         let id = sched.tasks.len() as u64;
-        sched.tasks.push(Task::new(id, entry));
+        let mut task = Task::new(id, entry);
+        task.page_table = page_table;
+        sched.tasks.push(task);
         id
     }
+}
+
+/// Añade una tarea nueva a la cola. No empieza a correr hasta que le
+/// toque turno por `yield_now()`.
+pub fn spawn(entry: fn() -> !) -> u64 {
+    spawn_with_space(entry, 0)
 }
 
 /// Cede el turno a la siguiente tarea de la cola (round-robin). Si solo
@@ -59,6 +69,18 @@ pub fn yield_now() {
         let old_idx = sched.current;
         let next_idx = (old_idx + 1) % sched.tasks.len();
         sched.current = next_idx;
+
+        // Si la tarea que entra tiene su propio espacio de direcciones,
+        // cambiamos CR3 ANTES del cambio de registros — en Rust normal,
+        // no dentro del `switch_to` en ensamblador, para no meter más
+        // riesgo en la parte ya delicada. El espacio de kernel (P4[0])
+        // está compartido por diseño, así que el propio `switch_to` que
+        // viene justo después sigue siendo código válido y accesible
+        // aunque hayamos cambiado de espacio.
+        let next_pt = sched.tasks[next_idx].page_table;
+        if next_pt != 0 && next_pt != crate::mmu::current_address_space() {
+            crate::mmu::switch_address_space(next_pt);
+        }
 
         let old_ctx: *mut Context = &mut sched.tasks[old_idx].context;
         let new_ctx: *const Context = &sched.tasks[next_idx].context;

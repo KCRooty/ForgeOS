@@ -184,6 +184,37 @@ pub extern "C" fn kernel_main_upper(mb2_info_ptr: u64) -> ! {
         }
     }
 
+    // M4d — uniendo M4a+M4b+M4c: un espacio de direcciones REAL, no
+    // solo hilos de kernel compartiendo el mapa global. Comparte el
+    // kernel (P4[0]) a propósito — así las syscalls/interrupciones
+    // siguen funcionando sin importar qué proceso esté activo.
+    unsafe {
+        if let Some(new_space) = mmu::create_address_space() {
+            serial_println!("[proc] espacio de direcciones nuevo: PML4 @ 0x{:x}", new_space);
+
+            match pmm::alloc_frame() {
+                Some(priv_phys) => {
+                    let priv_virt: u64 = 0x0000_0060_0000_0000; // 384 GiB — privado de este espacio
+                    match mmu::map_page_in(new_space, priv_virt, priv_phys, true, false) {
+                        Ok(()) => serial_println!("[proc] mapeo privado OK (invisible para otros espacios)"),
+                        Err(e) => serial_println!("[proc] mapeo privado falló: {}", e),
+                    }
+                }
+                None => serial_println!("[proc] sin memoria física para el mapeo privado"),
+            }
+
+            let before = mmu::current_address_space();
+            mmu::switch_address_space(new_space);
+            serial_println!(
+                "[proc] CR3 cambiado de 0x{:x} a 0x{:x} — si ves esta línea, el kernel sigue vivo bajo un PML4 distinto",
+                before,
+                new_space
+            );
+        } else {
+            serial_println!("[proc] sin memoria física para el nuevo espacio de direcciones");
+        }
+    }
+
     // TODO M2b: heap real con free-list (recuperar memoria de dealloc)
     // TODO M2c: syscalls reales — aquí `caps::enforce` pasa a llamarse
     //           por cada una
