@@ -1,11 +1,12 @@
-//! GDT + TSS — M1b (BORRADOR SIN VERIFICAR EN QEMU TODAVÍA).
+//! GDT + TSS — M1b + M4f (BORRADOR SIN VERIFICAR EN QEMU TODAVÍA).
 //!
 //! En long mode la segmentación real ya no importa (todo es flat), pero
 //! seguimos necesitando una GDT válida con selectores de código/datos y
-//! un descriptor de TSS. El TSS es lo que nos da una pila IST separada
-//! para el manejador de double fault — así un double fault con la pila
-//! del kernel ya reventada no provoca un triple fault silencioso (reset
-//! de la máquina sin ni un log).
+//! un descriptor de TSS. El TSS nos da dos cosas: una pila IST separada
+//! para el manejador de double fault, y (desde M4f) `RSP0` — la pila
+//! que la CPU carga automáticamente cuando una interrupción interrumpe
+//! código en ring 3 y hay que volver a ring 0. Sin RSP0 configurado, la
+//! primera interrupción estando en ring 3 usaría una pila basura.
 //!
 //! Valores de descriptor estándar de osdev — mismo patrón que
 //! Asmodeus14/Nyx (`gdt.rs`) y nyxos-dev/nyx-os.
@@ -14,18 +15,26 @@ use core::mem::size_of;
 
 pub const KERNEL_CODE_SELECTOR: u16 = 0x08;
 pub const KERNEL_DATA_SELECTOR: u16 = 0x10;
-pub const TSS_SELECTOR: u16 = 0x18;
+pub const USER_DATA_SELECTOR: u16 = 0x18 | 3; // RPL=3
+pub const USER_CODE_SELECTOR: u16 = 0x20 | 3; // RPL=3
+pub const TSS_SELECTOR: u16 = 0x28;
 
 // present, ring0, código, ejecutable+legible, long mode (bit L)
 const KERNEL_CODE: u64 = 0x00AF9A000000FFFF;
 // present, ring0, datos, escribible
 const KERNEL_DATA: u64 = 0x00CF92000000FFFF;
+// mismos descriptores que los de kernel, con DPL=3 en vez de DPL=0
+// (bits 45-46 del descriptor, dentro del byte de acceso: 0x92->0xF2,
+// 0x9A->0xFA — el resto de bits no cambia)
+const USER_DATA: u64 = 0x00CFF2000000FFFF;
+const USER_CODE: u64 = 0x00AFFA000000FFFF;
 
 /// Índice en TSS.ist[] (0-based). El IDT referencia esto con ist=1
 /// (el campo IST del IDT es 1-based: 0 significa "no cambiar de pila").
 pub const DOUBLE_FAULT_IST_INDEX: usize = 0;
 
 const DOUBLE_FAULT_STACK_SIZE: usize = 4096 * 4; // 16 KiB
+const RSP0_STACK_SIZE: usize = 4096 * 4; // 16 KiB
 
 #[repr(C, packed)]
 pub struct Tss {
@@ -58,18 +67,25 @@ struct GdtPointer {
     base: u64,
 }
 
-static mut GDT: [u64; 5] = [0; 5]; // null, code, data, tss_low, tss_high
+// null, kernel_code, kernel_data, user_data, user_code, tss_low, tss_high
+static mut GDT: [u64; 7] = [0; 7];
 static mut TSS: Tss = Tss::new();
 static mut DOUBLE_FAULT_STACK: [u8; DOUBLE_FAULT_STACK_SIZE] = [0; DOUBLE_FAULT_STACK_SIZE];
+static mut RSP0_STACK: [u8; RSP0_STACK_SIZE] = [0; RSP0_STACK_SIZE];
 
 pub fn init() {
     unsafe {
-        let stack_top = DOUBLE_FAULT_STACK.as_ptr() as u64 + DOUBLE_FAULT_STACK_SIZE as u64;
-        TSS.ist[DOUBLE_FAULT_IST_INDEX] = stack_top;
+        let df_stack_top = DOUBLE_FAULT_STACK.as_ptr() as u64 + DOUBLE_FAULT_STACK_SIZE as u64;
+        TSS.ist[DOUBLE_FAULT_IST_INDEX] = df_stack_top;
+
+        let rsp0_top = RSP0_STACK.as_ptr() as u64 + RSP0_STACK_SIZE as u64;
+        TSS.rsp[0] = rsp0_top;
 
         GDT[0] = 0;
         GDT[1] = KERNEL_CODE;
         GDT[2] = KERNEL_DATA;
+        GDT[3] = USER_DATA;
+        GDT[4] = USER_CODE;
 
         let tss_addr = core::ptr::addr_of!(TSS) as u64;
         let tss_limit = (size_of::<Tss>() - 1) as u64;
@@ -82,11 +98,11 @@ pub fn init() {
             | (((tss_addr >> 24) & 0xFF) << 56);
         let high = (tss_addr >> 32) & 0xFFFFFFFF;
 
-        GDT[3] = low;
-        GDT[4] = high;
+        GDT[5] = low;
+        GDT[6] = high;
 
         let ptr = GdtPointer {
-            limit: (size_of::<[u64; 5]>() - 1) as u16,
+            limit: (size_of::<[u64; 7]>() - 1) as u16,
             base: core::ptr::addr_of!(GDT) as u64,
         };
 

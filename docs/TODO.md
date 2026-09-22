@@ -66,7 +66,18 @@ Todo lo demás falta. Esto es el inventario completo, no una selección.
   construido a mano** (`elf::TEST_ELF`, 123 bytes), no bytes inventados
   sin verificar. **Sin transición a ring 3 todavía** — necesita GDT
   ring3 + TSS.RSP0 + `iretq`, pieza aparte
-- ❌ **fork()/execve() completos** — necesita ring 3 + syscalls reales
+- ✅ **Transición a ring 3 (M4f)** *borrador sin verificar* —
+  `ring3.rs`: `iretq` con frame de interrupción construido a mano;
+  `gdt.rs` ampliado con selectores de usuario (DPL=3) + `TSS.RSP0`
+  (pila de kernel para cuando una interrupción llegue estando en ring
+  3). Probado con `TEST_ELF_RING3` — payload sin instrucciones
+  privilegiadas (`jmp $`, no `hlt`, que provocaría `#GP` en ring 3).
+  Comando `ring3test` en la consola, **viaje solo de ida a propósito**:
+  sin preemption conectada (M4b, parte pendiente), no hay forma de
+  recuperar el control tras saltar — por diseño no se ejecuta en el
+  arranque automático, solo a demanda
+- ❌ **Syscalls reales** — con ring 3 real ya hecho, es lo siguiente:
+  `syscall`/`sysret` + tabla de syscalls + `caps::enforce` por llamada
 - ❌ **wait()/exit()** — recolección de procesos zombie
 - ❌ **Señales** (signals) — al menos SIGKILL/SIGTERM/SIGSEGV
 - ❌ **Dispatcher de syscalls real** — el punto donde `caps::enforce`
