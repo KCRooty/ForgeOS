@@ -5,13 +5,20 @@
 #![no_std]
 #![no_main]
 #![feature(abi_x86_interrupt)]
+#![feature(alloc_error_handler)]
+
+extern crate alloc;
 
 mod caps;
 mod gdt;
+mod heap;
 mod idt;
+mod mb2;
 mod pic;
+mod pmm;
 mod serial;
 
+use alloc::boxed::Box;
 use core::panic::PanicInfo;
 
 #[panic_handler]
@@ -36,6 +43,16 @@ pub extern "C" fn kernel_main_upper(mb2_info_ptr: u64) -> ! {
 
     pic::init();
     serial_println!("[pic] remapeado a vectores 32-47, todo enmascarado (sin drivers de IRQ aún)");
+
+    // M2 — allocador físico + heap del kernel.
+    unsafe { pmm::init(mb2_info_ptr) };
+    serial_println!("[pmm] {} frames libres tras reservar kernel + primer MiB", pmm::free_frame_count());
+
+    // Prueba end-to-end del heap: un Box real. Si esto imprime el valor
+    // correcto, `#[global_allocator]` funciona de extremo a extremo, no
+    // solo que compila.
+    let boxed = Box::new(0xC0FFEEu64);
+    serial_println!("[heap] Box::new(0xC0FFEE) = 0x{:x} (dirección: {:p})", *boxed, boxed);
 
     // Prueba end-to-end: disparamos un breakpoint por software (#BP) y
     // comprobamos que el handler se ejecuta y la CPU sigue viva después.
@@ -75,8 +92,9 @@ pub extern "C" fn kernel_main_upper(mb2_info_ptr: u64) -> ! {
         Err(_) => serial_println!("[caps] ampliar pledge -> denegado (correcto, es irreversible)"),
     }
 
-    // TODO M2: allocador físico, heap del kernel, dispatcher de syscalls
-    //          real (aquí `caps::enforce` pasa a llamarse por cada syscall)
+    // TODO M2b: heap real con free-list (recuperar memoria de dealloc)
+    // TODO M2c: syscalls reales — aquí `caps::enforce` pasa a llamarse
+    //           por cada una
     // TODO M3: framebuffer (Multiboot2 tag de vídeo) + texto en pantalla
     // TODO M4: scheduler + tabla de procesos, cada uno con su Capabilities
 
