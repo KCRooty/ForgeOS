@@ -11,6 +11,7 @@ extern crate alloc;
 
 mod caps;
 mod console;
+mod font;
 mod framebuffer;
 mod gdt;
 mod heap;
@@ -98,11 +99,12 @@ pub extern "C" fn kernel_main_upper(mb2_info_ptr: u64) -> ! {
     // demuestra que se escribe de verdad en pantalla, nada de estética.
     unsafe { framebuffer::init(mb2_info_ptr) };
     framebuffer::test_pattern();
+    framebuffer::draw_str(20, 20, "FORGE OS BOOT OK", 0x00000000, 4);
 
     // TODO M2b: heap real con free-list (recuperar memoria de dealloc)
     // TODO M2c: syscalls reales — aquí `caps::enforce` pasa a llamarse
     //           por cada una
-    // TODO M3b: texto en pantalla (fuente bitmap) — de momento solo color
+    // TODO M3c: ampliar el alfabeto de font.rs más allá de F/O/R/G/E/S/B/T/K
     // TODO M4: scheduler + tabla de procesos; shell real ("Bellows")
     // TODO M6+: Anvil + terminal ("Crucible")
 

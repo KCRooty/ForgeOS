@@ -136,3 +136,28 @@ pub fn test_pattern() {
 
     serial_println!("[fb] patrón de prueba dibujado (8 barras de color)");
 }
+
+/// Dibuja un carácter en (x,y) usando la fuente 8x8 de `font.rs`,
+/// escalado `scale` veces (cada "píxel" de fuente se convierte en un
+/// bloque de `scale`x`scale` píxeles reales — así se ve a tamaño legible
+/// en una pantalla de 1024x768 sin necesitar una fuente más grande).
+pub fn draw_char(x: u32, y: u32, c: char, color: u32, scale: u32) {
+    let bitmap = crate::font::glyph(c);
+    for (row, bits) in bitmap.iter().enumerate() {
+        for col in 0..8u32 {
+            if bits & (0x80 >> col) != 0 {
+                fill_rect(x + col * scale, y + row as u32 * scale, scale, scale, color);
+            }
+        }
+    }
+}
+
+/// Cadena completa, avanzando el cursor un ancho de glifo + un hueco
+/// pequeño entre letras.
+pub fn draw_str(x: u32, y: u32, s: &str, color: u32, scale: u32) {
+    let mut cursor_x = x;
+    for c in s.chars() {
+        draw_char(cursor_x, y, c, color, scale);
+        cursor_x += crate::font::GLYPH_WIDTH * scale + scale;
+    }
+}
