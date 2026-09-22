@@ -81,6 +81,13 @@ sistema. Ver `PHILOSOPHY.md` — cero deuda heredada.
 
 ## Dónde vive esto en el roadmap
 
+**Nota (revisitada):** se planteó reabrir virtualización tipo KVM y
+scheduler de GPU. Siguen fuera de alcance por los mismos motivos de
+siempre — KVM necesita VT-x/AMD-V + hipervisor + virtio, del tamaño de
+otro subsistema del kernel; un scheduler de GPU necesita primero un
+driver de GPU con cómputo real, que no existe. Quedan como aspiración
+lejana explícita, no como próximo paso.
+
 **No es un milestone cercano.** La capa de compatibilidad Linux completa
 es, como mínimo, tan grande como todo lo que llevamos construido del
 kernel hasta ahora — probablemente más. Se aborda una vez el OS nativo
