@@ -56,6 +56,8 @@ const TFD_ERR: u32 = 1 << 0; // bit0 del Task File Data = ERR
 
 const ATA_CMD_IDENTIFY_DEVICE: u8 = 0xEC;
 const ATA_CMD_READ_DMA_EXT: u8 = 0x25;
+const ATA_CMD_WRITE_DMA_EXT: u8 = 0x35;
+const ATA_CMD_FLUSH_CACHE_EXT: u8 = 0xEA;
 
 /// Command Header — una por slot, 32 bytes, formato estándar AHCI
 /// (spec §4.2.2, idéntico en cualquier implementación).
@@ -140,6 +142,7 @@ unsafe fn issue_command(
     port: &AhciPort,
     data_buf: u64,
     byte_count: u32,
+    write: bool,
     setup_fis: impl FnOnce(*mut u8),
 ) -> Result<(), &'static str> {
     // Limpiamos la Command Table entera antes de cada comando — evita
@@ -147,7 +150,9 @@ unsafe fn issue_command(
     core::ptr::write_bytes(port.cmd_table as *mut u8, 0, 4096);
 
     let header = &mut *(port.cmd_list as *mut CmdHeader);
-    header.flags = 5; // CFL=5 DWORDS: el FIS H2D Register mide exactamente eso
+    // CFL=5 DWORDS (el FIS H2D Register mide exactamente eso).
+    // Bit 6 = W: 1 = escritura host->dispositivo, 0 = lectura.
+    header.flags = 5 | if write { 1 << 6 } else { 0 };
     header.prdtl = 1;
     header.prdbc = 0;
     header.ctba = port.cmd_table as u32;
@@ -189,7 +194,7 @@ unsafe fn identify(port: &AhciPort) -> Option<[u8; 40]> {
     let data_buf = crate::pmm::alloc_frame()?;
     core::ptr::write_bytes(data_buf as *mut u8, 0, 4096);
 
-    if let Err(e) = issue_command(port, data_buf, 512, |cfis| {
+    if let Err(e) = issue_command(port, data_buf, 512, false, |cfis| {
         *cfis.add(2) = ATA_CMD_IDENTIFY_DEVICE;
     }) {
         serial_println!("[ahci] IDENTIFY: {}", e);
@@ -209,6 +214,23 @@ unsafe fn identify(port: &AhciPort) -> Option<[u8; 40]> {
     }
     crate::pmm::free_frame(data_buf);
     Some(model)
+}
+
+/// Rellena un FIS H2D para un comando LBA48 de transferencia de
+/// sectores (READ/WRITE DMA EXT comparten exactamente este layout —
+/// spec ATA §7.24/§7.60, solo cambia el opcode).
+unsafe fn setup_lba48_fis(cfis: *mut u8, command: u8, lba: u64, count: u16) {
+    *cfis.add(2) = command;
+    // LBA48: bytes bajos en 4-6, altos en 8-10
+    *cfis.add(4) = lba as u8;
+    *cfis.add(5) = (lba >> 8) as u8;
+    *cfis.add(6) = (lba >> 16) as u8;
+    *cfis.add(7) = 1 << 6; // device: bit6 = modo LBA
+    *cfis.add(8) = (lba >> 24) as u8;
+    *cfis.add(9) = (lba >> 32) as u8;
+    *cfis.add(10) = (lba >> 40) as u8;
+    *cfis.add(12) = count as u8;
+    *cfis.add(13) = (count >> 8) as u8;
 }
 
 /// Lee `count` sectores de 512 bytes empezando en el LBA dado, usando
@@ -234,18 +256,8 @@ pub fn read_sectors(port: &AhciPort, lba: u64, count: u16, dest: &mut [u8]) -> R
         };
         core::ptr::write_bytes(data_buf as *mut u8, 0, 4096);
 
-        let result = issue_command(port, data_buf, byte_count as u32, |cfis| {
-            *cfis.add(2) = ATA_CMD_READ_DMA_EXT;
-            // LBA48: bytes bajos en 4-6, altos en 8-10 (spec ATA §7.24)
-            *cfis.add(4) = lba as u8;
-            *cfis.add(5) = (lba >> 8) as u8;
-            *cfis.add(6) = (lba >> 16) as u8;
-            *cfis.add(7) = 1 << 6; // device: bit6 = modo LBA
-            *cfis.add(8) = (lba >> 24) as u8;
-            *cfis.add(9) = (lba >> 32) as u8;
-            *cfis.add(10) = (lba >> 40) as u8;
-            *cfis.add(12) = count as u8;
-            *cfis.add(13) = (count >> 8) as u8;
+        let result = issue_command(port, data_buf, byte_count as u32, false, |cfis| {
+            setup_lba48_fis(cfis, ATA_CMD_READ_DMA_EXT, lba, count);
         });
 
         if result.is_ok() {
@@ -253,6 +265,109 @@ pub fn read_sectors(port: &AhciPort, lba: u64, count: u16, dest: &mut [u8]) -> R
         }
         crate::pmm::free_frame(data_buf);
         result
+    }
+}
+
+/// Escribe `count` sectores de 512 bytes en el LBA dado, usando
+/// `WRITE DMA EXT` (LBA48), seguido de `FLUSH CACHE EXT` para que los
+/// datos lleguen de verdad al medio y no se queden en la caché del
+/// disco (sin el flush, un corte de corriente los perdería).
+///
+/// ⚠️ **Destructivo**: sobrescribe el contenido del disco en ese LBA.
+/// Mismas restricciones de tamaño que `read_sectors`.
+pub fn write_sectors(port: &AhciPort, lba: u64, count: u16, src: &[u8]) -> Result<(), &'static str> {
+    let byte_count = count as usize * 512;
+    if src.len() != byte_count {
+        return Err("el buffer de origen no coincide con count*512");
+    }
+    if byte_count > 4096 {
+        return Err("máximo 8 sectores por llamada en esta versión (un solo PRDT)");
+    }
+
+    unsafe {
+        let data_buf = match crate::pmm::alloc_frame() {
+            Some(f) => f,
+            None => return Err("sin memoria física para el buffer DMA"),
+        };
+        core::ptr::write_bytes(data_buf as *mut u8, 0, 4096);
+        core::ptr::copy_nonoverlapping(src.as_ptr(), data_buf as *mut u8, byte_count);
+
+        let result = issue_command(port, data_buf, byte_count as u32, true, |cfis| {
+            setup_lba48_fis(cfis, ATA_CMD_WRITE_DMA_EXT, lba, count);
+        });
+        crate::pmm::free_frame(data_buf);
+        result?;
+
+        // FLUSH CACHE EXT — sin datos asociados, pero el PRDT debe
+        // apuntar a algo válido, así que reutilizamos un frame mínimo.
+        let flush_buf = match crate::pmm::alloc_frame() {
+            Some(f) => f,
+            None => return Err("escritura OK pero sin memoria para el flush"),
+        };
+        let flush_result = issue_command(port, flush_buf, 512, false, |cfis| {
+            *cfis.add(2) = ATA_CMD_FLUSH_CACHE_EXT;
+            *cfis.add(7) = 1 << 6;
+        });
+        crate::pmm::free_frame(flush_buf);
+        flush_result
+    }
+}
+
+/// Devuelve el primer puerto AHCI con un disco SATA listo, ya
+/// inicializado. Para uso desde la consola de depuración y, más
+/// adelante, desde el VFS (M5).
+pub fn first_disk() -> Option<AhciPort> {
+    let dev = find_controller()?;
+    let bars = pci::read_bars(dev.bus, dev.device, dev.function);
+    let abar = bars[5];
+    if !pci::bar_is_memory(abar) || abar == 0 {
+        return None;
+    }
+    let base = pci::bar_memory_address(abar);
+
+    unsafe {
+        let ghc = reg_read(base, REG_GHC);
+        reg_write(base, REG_GHC, ghc | GHC_AE);
+        let pi = reg_read(base, REG_PI);
+
+        for port in 0..32u32 {
+            if pi & (1 << port) == 0 {
+                continue;
+            }
+            let port_base = base + PORT_BASE + (port as u64) * PORT_SIZE;
+            if reg_read(port_base, PORT_SSTS) & 0xF != 0x3 {
+                continue;
+            }
+            if reg_read(port_base, PORT_SIG) != SATA_SIG_ATA {
+                continue;
+            }
+            return init_port(port_base);
+        }
+    }
+    None
+}
+
+/// Prueba de escritura NO destructiva: lee un sector, lo reescribe tal
+/// cual, y verifica que sigue igual. Si el contenido cambia, algo va
+/// mal en el camino de escritura.
+///
+/// Usa un LBA alto (por defecto 2048) para no tocar el MBR ni tablas de
+/// particiones aunque el disco tenga datos.
+pub fn write_readback_test(port: &AhciPort, lba: u64) -> Result<(), &'static str> {
+    let mut original = [0u8; 512];
+    read_sectors(port, lba, 1, &mut original)?;
+
+    // Reescribimos exactamente lo mismo que había: si todo funciona, el
+    // disco queda idéntico a como estaba.
+    write_sectors(port, lba, 1, &original)?;
+
+    let mut readback = [0u8; 512];
+    read_sectors(port, lba, 1, &mut readback)?;
+
+    if original == readback {
+        Ok(())
+    } else {
+        Err("el contenido leído tras escribir no coincide con el original")
     }
 }
 
