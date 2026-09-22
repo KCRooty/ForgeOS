@@ -35,8 +35,12 @@ Todo lo demás falta. Esto es el inventario completo, no una selección.
 
 ## 2. Procesos, scheduling y syscalls reales (M4)
 
-- ❌ **PCB (Process Control Block)** — estructura real de proceso, con
-  su `Capabilities` (ya tenemos el tipo, falta usarlo de verdad)
+- ✅ **M4a: tareas cooperativas del kernel** (`task.rs` + `scheduler.rs`)
+  *borrador sin verificar* — cambio de contexto real (`switch_to`, asm
+  `#[naked]`), scheduler round-robin, demo de 2 tareas intercaladas.
+  **Todavía sin espacio de direcciones propio por tarea** (eso es M4c)
+- ❌ **PCB completo** (más allá de la `Task` mínima de M4a — falta
+  vincular `Capabilities`, estado de proceso completo, etc.)
 - ❌ **Scheduler** — round-robin como mínimo, weighted más adelante
 - ❌ **Context switch** — guardar/restaurar registros, FPU/SSE state
 - ❌ **fork() / execve() reales** — con carga de ELF64 propio
@@ -160,6 +164,13 @@ Todo lo demás falta. Esto es el inventario completo, no una selección.
   el sentido que tú quieres, es un live-CD para siempre.
 - ❌ **Parser de tabla de particiones** (GPT/MBR)
 - ❌ **Instalación del bootloader** en el disco de destino
+- ❌ **Strata** — gestor de disco/particiones tipo GParted (nombre
+  propuesto). Cadena de dependencias real, de abajo a arriba: driver de
+  almacenamiento (AHCI/NVMe, sección 4) → parser GPT/MBR → formateo de
+  filesystems (mínimo el nuestro, idealmente también FAT32/ext4/NTFS de
+  solo-lectura para interoperar con otros OS al lado) → UI (Anvil,
+  M6+). Versión mínima en modo texto sobre la consola de depuración es
+  factible bastante antes que la versión gráfica.
 
 ## 12. Cosas que no has pedido pero "como Windows y Linux" las exige
 
