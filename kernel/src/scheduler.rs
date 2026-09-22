@@ -5,7 +5,7 @@
 //! TODO.md sección 1). Cada tarea corre hasta que llama a
 //! `yield_now()` por su cuenta.
 
-use crate::task::{Context, Task};
+use crate::task::{Context, Task, TaskState};
 use alloc::vec::Vec;
 use core::cell::UnsafeCell;
 
@@ -53,8 +53,23 @@ pub fn spawn(entry: fn() -> !) -> u64 {
     spawn_with_space(entry, 0)
 }
 
-/// Cede el turno a la siguiente tarea de la cola (round-robin). Si solo
-/// hay una tarea (o el scheduler no está inicializado), no hace nada.
+/// Marca la tarea actualmente en ejecución como `Finished` — nunca más
+/// recibirá turno en `yield_now()`. Para `exit()`: la tarea sigue
+/// "existiendo" (su `Context` no se toca, por si algo la referenciara),
+/// pero el round-robin la salta de ahora en adelante.
+pub fn mark_current_finished() {
+    unsafe {
+        let sched = match (*SCHEDULER.0.get()).as_mut() {
+            Some(s) => s,
+            None => return,
+        };
+        sched.tasks[sched.current].state = TaskState::Finished;
+    }
+}
+
+/// Cede el turno a la siguiente tarea `Ready`/`Running` de la cola
+/// (round-robin, saltando las `Finished`). Si no hay ninguna otra tarea
+/// elegible (o el scheduler no está inicializado), no hace nada.
 pub fn yield_now() {
     unsafe {
         let sched = match (*SCHEDULER.0.get()).as_mut() {
@@ -67,7 +82,19 @@ pub fn yield_now() {
         }
 
         let old_idx = sched.current;
-        let next_idx = (old_idx + 1) % sched.tasks.len();
+        let mut next_idx = old_idx;
+        let mut found = false;
+        for step in 1..=sched.tasks.len() {
+            let candidate = (old_idx + step) % sched.tasks.len();
+            if sched.tasks[candidate].state != TaskState::Finished {
+                next_idx = candidate;
+                found = true;
+                break;
+            }
+        }
+        if !found || next_idx == old_idx {
+            return; // nadie más elegible — quedarse donde estamos
+        }
         sched.current = next_idx;
 
         // Si la tarea que entra tiene su propio espacio de direcciones,

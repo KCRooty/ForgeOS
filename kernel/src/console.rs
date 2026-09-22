@@ -10,7 +10,7 @@
 //! Ver docs/SHELL.md para la relación con el shell y el terminal reales.
 
 use crate::serial::SerialPort;
-use crate::{ahci, caps, elf, framebuffer, mmu, pci, pmm, ring3, rtl8139, vfs};
+use crate::{ahci, caps, elf, framebuffer, mmu, pci, pmm, process, ring3, rtl8139, scheduler, vfs};
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::fmt::Write;
@@ -79,7 +79,7 @@ fn dispatch(port: &mut SerialPort, line: &str) {
         "help" => {
             let _ = write!(
                 port,
-                "comandos: help, meminfo, caps, bp, panic, fb, pci, ahci, net, disktest, ls, cat, write, ring3test, synccalltest, synccalldeny\r\n"
+                "comandos: help, meminfo, caps, bp, panic, fb, pci, ahci, net, disktest, ls, cat, write, ring3test, synccalltest, synccalldeny, forktest, exec, ps\r\n"
             );
         }
         "synccalltest" => {
@@ -114,7 +114,11 @@ fn dispatch(port: &mut SerialPort, line: &str) {
                             return;
                         }
                     };
-                    let user_stack_virt: u64 = 0x0000_0070_0000_0000; // 448 GiB, privado del proceso
+                    // 704 GiB, índice P4=1 — genuinamente privado (ver
+                    // la nota larga en elf.rs sobre por qué una
+                    // dirección por debajo de 512 GiB NO lo es, aunque
+                    // esté muy por encima de los 4 GiB del identity-map).
+                    let user_stack_virt: u64 = 0x0000_00B0_0000_0000;
                     if let Err(e) = mmu::map_page_in(loaded.page_table, user_stack_virt, stack_phys, true, false) {
                         let _ = write!(port, "fallo mapeando la pila de usuario: {}\r\n", e);
                         return;
@@ -128,6 +132,55 @@ fn dispatch(port: &mut SerialPort, line: &str) {
                 Err(e) => {
                     let _ = write!(port, "carga del ELF falló: {}\r\n", e);
                 }
+            }
+        }
+        "forktest" => {
+            let _ = write!(port, "cargando ELF de fork y arrancandolo como proceso real...\r\n");
+            caps::set_current({
+                let mut c = caps::Capabilities::unrestricted();
+                let _ = c.pledge(caps::CAP_STDIO | caps::CAP_EXEC);
+                c
+            });
+            if let Some(pid) = launch_elf(port, &elf::TEST_ELF_FORK, 0) {
+                let _ = write!(port, "PID {} arrancado — cediendo turno para que padre e hijo corran...\r\n", pid);
+                // Suficientes yields para que: el padre corra hasta
+                // fork()+ping+exit, el hijo (creado por fork() a mitad
+                // de camino) corra hasta su propio ping+exit, y volvamos
+                // aquí. No hay preemption real todavía (M4b la deja
+                // pendiente) — sin ceder explícitamente el turno como
+                // aquí, ninguna de las dos tareas nuevas llegaría nunca
+                // a ejecutarse.
+                for _ in 0..2 {
+                    scheduler::yield_now();
+                }
+                let _ = write!(port, "de vuelta en la consola — revisa 'ps' para ver el resultado.\r\n");
+            }
+        }
+        "exec" => {
+            let _ = write!(port, "guardando TEST_ELF_PING_EXIT como 'pingtest' en el VFS...\r\n");
+            vfs::write("pingtest", &elf::TEST_ELF_PING_EXIT);
+            let _ = write!(port, "arrancando proceso que se reemplaza a si mismo via execve(\"pingtest\")...\r\n");
+            caps::set_current({
+                let mut c = caps::Capabilities::unrestricted();
+                let _ = c.pledge(caps::CAP_STDIO | caps::CAP_EXEC);
+                c
+            });
+            if let Some(pid) = launch_elf(port, &elf::TEST_ELF_EXECVE, 0) {
+                let _ = write!(port, "PID {} arrancado — cediendo turno...\r\n", pid);
+                for _ in 0..2 {
+                    scheduler::yield_now();
+                }
+                let _ = write!(port, "de vuelta en la consola.\r\n");
+            }
+        }
+        "ps" => {
+            let _ = write!(port, "PID  PPID  ESTADO\r\n");
+            for p in process::list() {
+                let estado: alloc::string::String = match p.state {
+                    process::ProcessState::Running => alloc::string::String::from("running"),
+                    process::ProcessState::Zombie(code) => alloc::format!("zombie(code={})", code),
+                };
+                let _ = write!(port, "{:<4} {:<5} {}\r\n", p.pid, p.parent_pid, estado);
             }
         }
         "ls" => {
@@ -234,6 +287,42 @@ fn run_synccall_elf(port: &mut SerialPort) {
         Err(e) => {
             let _ = write!(port, "carga del ELF falló: {}\r\n", e);
         }
+    }
+}
+
+/// Carga `bytes` como ELF, le monta una pila de usuario, y lo arranca
+/// como un proceso real de la tabla de `process.rs` — vía
+/// `scheduler::spawn_with_space`, no con un `enter_ring3` directo de un
+/// solo sentido como `run_synccall_elf`/`ring3test`. Necesario para que
+/// haya una tarea a la que el scheduler pueda volver (y ceder turno
+/// entre padre/hijo) en vez de quedarse encallado en ring 3 para
+/// siempre. `parent_pid` = 0 para "sin padre" (lanzado directamente
+/// desde la consola, no por `fork()`).
+fn launch_elf(port: &mut SerialPort, bytes: &[u8], parent_pid: u64) -> Option<u64> {
+    let loaded = match elf::load(bytes) {
+        Ok(l) => l,
+        Err(e) => {
+            let _ = write!(port, "carga del ELF falló: {}\r\n", e);
+            return None;
+        }
+    };
+
+    unsafe {
+        let stack_phys = match pmm::alloc_frame() {
+            Some(f) => f,
+            None => {
+                let _ = write!(port, "sin memoria para la pila de usuario\r\n");
+                return None;
+            }
+        };
+        let user_stack_virt: u64 = 0x0000_0090_0000_0000; // 576 GiB, privado del proceso
+        if let Err(e) = mmu::map_page_in(loaded.page_table, user_stack_virt, stack_phys, true, false) {
+            let _ = write!(port, "fallo mapeando la pila de usuario: {}\r\n", e);
+            return None;
+        }
+        let user_stack_top = user_stack_virt + 4096;
+
+        Some(process::spawn_process(loaded.entry_point, user_stack_top, loaded.page_table, parent_pid))
     }
 }
 
