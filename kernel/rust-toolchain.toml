@@ -1,0 +1,8 @@
+[toolchain]
+# Fijado a una fecha concreta: el formato del target JSON custom
+# (target-pointer-width, executables, pre-link-args, rustc-abi) cambia
+# entre nightlies sin aviso — pin explícito para que el build sea
+# reproducible. Sube la fecha a mano cuando quieras probar una nightly
+# más reciente, revisando el target spec si algo rompe.
+channel = "nightly-2026-07-01"
+components = ["rust-src"]

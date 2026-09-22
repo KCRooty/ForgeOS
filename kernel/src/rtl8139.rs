@@ -14,6 +14,7 @@
 //! CmdReset=0x10 — todos coinciden exactamente.
 
 use crate::pci::{self, PciDevice};
+use crate::pmm;
 use crate::serial_println;
 
 const RTL8139_VENDOR: u16 = 0x10EC;
