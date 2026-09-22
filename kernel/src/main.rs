@@ -67,6 +67,12 @@ pub extern "C" fn kernel_main_upper(mb2_info_ptr: u64) -> ! {
     unsafe { pmm::init(mb2_info_ptr) };
     serial_println!("[pmm] {} frames libres tras reservar kernel + primer MiB", pmm::free_frame_count());
 
+    // EFER.NXE antes de que nada use mmu::map_page con executable=false
+    // — el bit NO_EXECUTE de una PTE es "reservado" sin esto, y usarlo
+    // hace page fault (visto en la primera prueba real de M4c).
+    unsafe { mmu::init() };
+    serial_println!("[mmu] EFER.NXE habilitado");
+
     // Prueba end-to-end del heap: un Box real. Si esto imprime el valor
     // correcto, `#[global_allocator]` funciona de extremo a extremo, no
     // solo que compila.
