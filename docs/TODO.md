@@ -181,11 +181,23 @@ Todo lo demás falta. Esto es el inventario completo, no una selección.
   audio del punto 4
 - ❌ **Decodificación de vídeo** — mucho más difícil, fuera de alcance
   cercano (ver `COMPATIBILITY.md` para VLC como candidato de port nativo)
+- ❌ **Cargador glTF/GLB** — el formato 3D realista a priorizar (estándar
+  Khronos, el mismo ecosistema que Vulkan/OpenGL ES). FBX, Maya
+  (.ma/.mb), 3ds Max, Cinema 4D, Houdini y ZBrush son formatos
+  propietarios sin spec pública para reimplementación libre — no se
+  persiguen. DOCX/XLSX/PPTX tienen spec abierta (OOXML) pero es un
+  proyecto del tamaño de LibreOffice, no algo cercano
 
 ## 10. Estabilidad y QA
 
 - ❌ **Batería de tests KAT en CI** — principio ya escrito en
   `PHILOSOPHY.md`, pero no hay ni un solo test automatizado todavía
+- ❌ **Tracing/observabilidad en vivo** (equivalente mínimo a
+  perf/ftrace) — hueco que no habíamos ni mencionado. Sin esto, un bug
+  de *rendimiento* (no de correctitud, que sí cazan los KATs) no tiene
+  forma de diagnosticarse salvo prints manuales. No urgente ahora mismo
+  (nada que perfilar todavía sin SMP/scheduler real), pero anotado para
+  cuando M4 esté más maduro
 - ❌ **Pantalla de pánico gráfica** — hoy un panic solo cuelga y loguea
   por serie; Windows tiene BSOD, Linux tiene el panic de consola, los
   dos Nyx tienen pantalla de pánico gráfica — nosotros no tenemos nada
