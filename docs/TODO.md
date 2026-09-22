@@ -60,7 +60,13 @@ Todo lo demás falta. Esto es el inventario completo, no una selección.
   activo), scheduler cambia CR3 en Rust seguro al entrarle el turno a
   una tarea con espacio propio. Probado creando un espacio, mapeando
   algo privado en él, y cambiando CR3 de verdad.
-- ❌ **fork() / execve() reales** — con carga de ELF64 propio
+- ✅ **Cargador ELF64 (M4e)** *borrador sin verificar* — parseo de
+  cabecera + program headers, mapeo de segmentos PT_LOAD en un espacio
+  de direcciones nuevo. **Probado contra un ELF64 real y mínimo
+  construido a mano** (`elf::TEST_ELF`, 123 bytes), no bytes inventados
+  sin verificar. **Sin transición a ring 3 todavía** — necesita GDT
+  ring3 + TSS.RSP0 + `iretq`, pieza aparte
+- ❌ **fork()/execve() completos** — necesita ring 3 + syscalls reales
 - ❌ **wait()/exit()** — recolección de procesos zombie
 - ❌ **Señales** (signals) — al menos SIGKILL/SIGTERM/SIGSEGV
 - ❌ **Dispatcher de syscalls real** — el punto donde `caps::enforce`
@@ -80,7 +86,12 @@ Todo lo demás falta. Esto es el inventario completo, no una selección.
 
 ## 3. Filesystem (M5)
 
-- ❌ **VFS** — capa de abstracción, trait `FileSystem`, tabla de montaje
+- ✅ **VFS mínimo — tmpfs plano (M5, primer paso)** *borrador sin
+  verificar* — `vfs.rs`, namespace plano en memoria (sin directorios
+  todavía), write/read/delete/list, probado con escritura+lectura real
+  y comandos `ls`/`cat`/`write` en la consola. **Sin persistencia ni
+  jerarquía de directorios** — siguiente paso: filesystem real sobre
+  AHCI (que ya lee/escribe sectores)
 - ❌ **Initramfs/tarfs** — para arrancar userland antes de tener disco
   real montado (patrón usado por los dos Nyx)
 - ❌ **Filesystem persistente real** — ext2 es la opción pragmática
