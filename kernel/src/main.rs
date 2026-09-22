@@ -27,6 +27,7 @@ mod pci;
 mod pic;
 mod pmm;
 mod psf;
+mod ring3;
 mod rtl8139;
 mod vfs;
 mod scheduler;

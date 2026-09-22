@@ -12,7 +12,7 @@ Ver [docs/PHILOSOPHY.md](docs/PHILOSOPHY.md) (diseño técnico) y
 [docs/PRODUCT.md](docs/PRODUCT.md) (a quién sirve y por qué) para el
 razonamiento completo detrás de cada decisión.
 
-## Estado: ELF64 cargando de verdad + VFS mínimo (tmpfs), sin verificar en QEMU (en construcción)
+## Estado: M4f — ring 3 real (iretq), GDT+TSS ampliados, comando ring3test (viaje solo de ida a demanda), sin verificar en QEMU (en construcción)
 
 ## Referencias de arquitectura estudiadas
 - Asmodeus14/Nyx (Rust, QCLang, motor 3D Gen9.5 hand-rolled)
