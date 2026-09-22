@@ -60,7 +60,11 @@ Todo lo demás falta. Esto es el inventario completo, no una selección.
   real montado (patrón usado por los dos Nyx)
 - ❌ **Filesystem persistente real** — ext2 es la opción pragmática
   (compatible con herramientas externas de Linux para depurar discos
-  desde fuera), o diseñar uno propio — decisión pendiente
+  desde fuera), o diseñar uno propio — decisión pendiente. **Aspiración
+  a largo plazo inspirada en ZFS** (FreeBSD): bloques con checksum
+  (detección de corrupción de datos) y snapshots copy-on-write — no en
+  v1, pero como dirección de diseño del filesystem propio si se decide
+  no usar ext2 tal cual.
 - ❌ **/proc y /dev sintéticos** — Windows y Linux los dan por hecho
   (info de procesos navegable, nodos de dispositivo) — sin esto no se
   siente "como Windows y Linux" ni de lejos
@@ -104,8 +108,8 @@ Todo lo demás falta. Esto es el inventario completo, no una selección.
   etc. (referencia directa: los coreutils de nyxos-dev)
 - ❌ **Bellows** (el shell real, M4+) — pipelines, redirección, job
   control, `&&`/`||`/`;`, quoting, sustitución de comandos
-- ❌ **Gestor de paquetes** (`forge get`/`forge rm`) — decidir
-  binario-primero vs compilar-desde-fuente
+- ❌ **Gestor de paquetes** (`forge get`/`forge rm`) — modelo ports+pkg
+  de FreeBSD ya decidido, ver `ROADMAP.md`
 - ❌ **`dlopen`/`dlsym`** — enlazado dinámico, si se quiere en algún
   momento
 
