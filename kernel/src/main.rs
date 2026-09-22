@@ -21,6 +21,7 @@ mod heap;
 mod idt;
 mod keyboard;
 mod mb2;
+mod mmu;
 mod pci;
 mod pic;
 mod pmm;
@@ -152,6 +153,36 @@ pub extern "C" fn kernel_main_upper(mb2_info_ptr: u64) -> ! {
     // funcionalidad completa todavía (ver cabecera de cada fichero).
     ahci::probe_and_print();
     rtl8139::probe_and_print();
+
+    // M4c — gestor de memoria virtual. Prueba real: mapear una
+    // dirección virtual bien fuera del identity-map de 4 GiB de
+    // boot.asm, escribir, leer, y comprobar que coincide.
+    unsafe {
+        match pmm::alloc_frame() {
+            Some(test_phys) => {
+                let test_virt: u64 = 0x0000_0050_0000_0000; // 320 GiB — fuera del identity-map
+                match mmu::map_page(test_virt, test_phys, true, false) {
+                    Ok(()) => {
+                        let ptr = test_virt as *mut u64;
+                        ptr.write_volatile(0xDEAD_BEEF_CAFEu64);
+                        let readback = ptr.read_volatile();
+                        if readback == 0xDEAD_BEEF_CAFE {
+                            serial_println!(
+                                "[mmu] map_page funciona: escrito y releído 0x{:x} en virt=0x{:x}",
+                                readback,
+                                test_virt
+                            );
+                        } else {
+                            serial_println!("[mmu] map_page: valor releído NO coincide — algo va mal");
+                        }
+                        let _ = mmu::unmap_page(test_virt);
+                    }
+                    Err(e) => serial_println!("[mmu] map_page falló: {}", e),
+                }
+            }
+            None => serial_println!("[mmu] sin memoria física para la prueba"),
+        }
+    }
 
     // TODO M2b: heap real con free-list (recuperar memoria de dealloc)
     // TODO M2c: syscalls reales — aquí `caps::enforce` pasa a llamarse
