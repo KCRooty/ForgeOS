@@ -8,13 +8,46 @@ inventario completo, no una selección.
 el kernel compila y arranca de verdad en QEMU por primera vez. Llega
 hasta la consola de depuración (`forge>`) con MMU, espacio de
 direcciones por proceso (CR3 real), VFS y pipes confirmados
-funcionando, no solo revisados por lectura. Se encontró y arregló un
-bug real: `mmu::map_page` ponía el bit NO_EXECUTE sin que `EFER.NXE`
-estuviera habilitado, lo que crasheaba el boot con un page fault por
-reserved-bit violation — ver `mmu::init()`. El único fallo que queda
-del boot es ya conocido y deliberado: el loader ELF no puede partir
-huge pages todavía, así que `TEST_ELF` no llega a cargar (anotado en
-`mmu.rs` desde el principio, no es nuevo).
+funcionando, no solo revisados por lectura.
+
+**Actualización — `process.rs`, fork/execve/exit/getpid reales
+(Claude Code, verificado en QEMU):** reconstruidos desde cero (el zip
+`fork-execve` original no llegó a recuperarse) y verificados de
+extremo a extremo con los comandos de consola `forktest`/`exec`/`ps`:
+`fork()` clona el espacio de direcciones de verdad (copia profunda,
+`mmu::clone_address_space`), el hijo arranca como tarea nueva del
+scheduler vía `ring3::enter_ring3_with_rax` (rax=0 para el hijo),
+`getpid()`/`ping()`/`exit()` funcionan en ambos, `execve()` reemplaza
+el proceso de verdad cargando un binario nuevo desde el VFS. `ps`
+muestra la tabla de procesos real con PID/PPID/estado.
+
+En el camino aparecieron y se arreglaron cuatro bugs reales, todos
+preexistentes (nunca se había ejecutado nada de esto en QEMU antes de
+esta sesión):
+- `mmu::map_page` ponía el bit NO_EXECUTE sin que `EFER.NXE` estuviera
+  habilitado — page fault por reserved-bit violation (`mmu::init()`).
+- Ningún mapeo de `mmu.rs` ponía nunca el bit `PAGE_USER` — cualquier
+  acceso desde ring 3 fallaba (faltaba en TODOS los niveles de la
+  jerarquía, no solo en la hoja).
+- `mmu::translate()` le faltaba el último nivel de indirección: caminaba
+  P4→P3→P2 y trataba el puntero a la tabla P1 como si ya fuera la
+  página de datos final. Efecto real: `copy_into_segment` escribía el
+  contenido de cada ELF cargado ENCIMA de su propia tabla de páginas en
+  vez de en la página de código — silencioso hasta que algo intentaba
+  ejecutar el ELF cargado.
+- `sys_exit()` no restauraba las interrupciones (`sti`) antes de ceder
+  el control para siempre — `syscall_entry` las enmascara al entrar
+  (FMASK) y normalmente se restauran solo al volver por `sysretq`, pero
+  `exit()` diverge a propósito y nunca llega ahí. Sin el `sti`, el
+  `hlt` de la consola de depuración se quedaba colgado para siempre en
+  cuanto cualquier proceso llamaba a `exit()` — la CPU invitada seguía
+  viva (QEMU no crasheaba), simplemente parada sin forma de despertar.
+- Los `TEST_ELF*` usaban `vaddr=0x400000` (convención clásica), que
+  cae dentro del identity-map real de `boot.asm` (0-4 GiB) — colisión
+  con memoria ya mapeada del propio kernel. Movidos a 640 GiB
+  (`0x0000_00A0_0000_0000`, índice P4=1) — ver la nota larga en
+  `elf.rs` sobre por qué cualquier dirección por debajo de 512 GiB
+  (`1<<39`) es, en la práctica, compartida entre todos los procesos.
 
 ---
 
@@ -24,14 +57,9 @@ Este repo se importó a partir de 37 snapshots de desarrollo pasados desde
 Claude web (ver `docs/MEGADOC.md` para el documento maestro completo). El
 propio megadoc (v1.2) documenta milestones posteriores al último snapshot
 que se pudo importar (`rtl8139-tx`) para los que no llegó a recuperarse el
-zip correspondiente. Quedan como próximo trabajo real en Claude Code, no
-como diseño sin probar:
+zip correspondiente. `process.rs` y fork/execve/exit/getpid (milestone
+`fork-execve`) ya se reconstruyeron y verificaron — ver arriba. Queda:
 
-- ❌ **`process.rs`** — PCB real, tabla global de procesos, `alloc_pid()`,
-  `mark_zombie()` (milestone `fork-execve`)
-- ❌ **`SYS_FORK`/`SYS_EXECVE`/`SYS_EXIT`/`SYS_GETPID` reales** —
-  `clone_address_space`, `enter_ring3_with_rax` para el hijo de fork()
-  (milestone `fork-execve`)
 - ❌ **`partinfo.rs`** — escáner de particiones GPT/MBR, detección de FS
   (ext2/3/4, btrfs, NTFS, FAT32) (milestone `partinfo-ext4-preempt`)
 - ❌ **`preempt.rs`** — preemption real vía timer APIC, separado de M4b
@@ -96,8 +124,11 @@ como diseño sin probar:
   *borrador sin verificar* — cambio de contexto real (`switch_to`, asm
   `#[naked]`), scheduler round-robin, demo de 2 tareas intercaladas.
   **Todavía sin espacio de direcciones propio por tarea** (eso es M4c)
-- ❌ **PCB completo** (más allá de la `Task` mínima de M4a — falta
-  vincular `Capabilities`, estado de proceso completo, etc.)
+- ✅ **PCB real (`process.rs`)** *verificado en QEMU* — PID/PPID/estado
+  (`Running`/`Zombie(exit_code)`)/PML4 por proceso, tabla global,
+  `alloc_pid`/`register`/`mark_zombie`/`set_page_table`. **Pendiente:**
+  vincular `Capabilities` por proceso — sigue siendo un único slot
+  global (`caps::CURRENT`), no por PID.
 - ❌ **Scheduler** — round-robin como mínimo, weighted más adelante
 - ❌ **Context switch** — guardar/restaurar registros, FPU/SSE state
 - ✅ **Espacios de direcciones por proceso (M4d)** *borrador sin
@@ -143,10 +174,29 @@ como diseño sin probar:
   sigue pendiente). Dos comandos de consola para ver los dos casos:
   `synccalltest` (con `CAP_STDIO`, permitido) y `synccalldeny` (sin él,
   denegado con log explícito)
-- ❌ **wait()/exit()** — recolección de procesos zombie
+- ✅ **`fork()`/`execve()`/`exit()`/`getpid()` reales (M4i)**
+  *verificado en QEMU* — `syscall.rs`: `SYS_FORK`(57)/`SYS_EXECVE`(59)/
+  `SYS_EXIT`(60)/`SYS_GETPID`(39), numeración compatible Linux x86_64.
+  `fork()` usa `mmu::clone_address_space` (copia profunda de
+  `P4[1..=255]`) + `ring3::enter_ring3_with_rax` para arrancar al hijo
+  como tarea nueva del scheduler con `rax=0`. `execve()` lee el nombre
+  del fichero desde memoria de usuario, lo busca en el VFS, carga el
+  ELF y reemplaza el espacio de direcciones — diverge a propósito
+  (nunca vuelve a `syscall_dispatch`). `exit()` marca zombie y cede el
+  turno para siempre (`scheduler::mark_current_finished` + `sti` +
+  `yield_now()` en bucle — el `sti` es imprescindible, ver nota de
+  arriba). Comandos de consola `forktest`/`exec`/`ps`. **Limitación
+  conocida:** el hijo de `fork()` NO hereda todos los registros del
+  padre, solo `rip`/`rsp`/`rflags`/`rax` (ver aviso largo en
+  `ring3::enter_ring3_with_rax`) — vale para el payload de prueba, no
+  para un `fork()` de propósito general todavía.
+- ❌ **`wait()`** — recolección de zombies por el padre (`exit()` ya
+  deja el proceso en `Zombie(exit_code)`, pero nadie lo recoge ni libera
+  su PML4/frames — fuga de memoria de facto en sesiones largas)
 - ❌ **Señales** (signals) — al menos SIGKILL/SIGTERM/SIGSEGV
-- ❌ **Dispatcher de syscalls real** — el punto donde `caps::enforce`
-  se vuelve operativo por primera vez, no solo demo
+- ✅ **Dispatcher de syscalls real** *verificado en QEMU* — ya no es
+  demo aislada: `caps::enforce_current` protege `SYS_PING`, `CAP_EXEC`
+  protege `SYS_FORK`/`SYS_EXECVE`
 - ✅ **IPC — pipes (M4i)** *borrador sin verificar* — `pipe.rs`, buffer
   circular por pipe (FIFO real, probado escribiendo más de lo que se
   lee de golpe y comprobando que el resto queda pendiente). Namespace
