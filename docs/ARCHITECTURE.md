@@ -136,13 +136,20 @@ Categorías actuales (`CapMask`, `u32`, una por bit):
   > compositor 2D) no necesita ninguna de las tres — fill_rect/blit es
   > aceleración 2D pura, ya cubierta por la fase BLT de arriba. Una API
   > 3D solo hace falta para juegos/apps con geometría real, y es una
-  > capa aparte, mucho más grande, encima del driver de GPU. Si algún
-  > día se aborda: **OpenGL ES primero** (spec más acotada, Mesa como
-  > referencia para verificar cada función, mismo método que ya usamos
-  > con los registros de AHCI/RTL8139) — Vulkan queda como aspiración
-  > mucho más lejana (spec de miles de páginas; Mesa tardó años con
-  > equipo grande solo en RADV), con AMDVLK como referencia cuando
-  > llegue ese momento.
+  > capa aparte, mucho más grande, encima del driver de GPU.
+  >
+  > **Atajo real (vía BoredOS):** portar **TinyGL** — un subconjunto de
+  > OpenGL renderizado *por software*. Da 3D funcional sin necesitar
+  > ningún driver de GPU, es lo que permite a BoredOS correr DOOM. Es
+  > con diferencia el camino más corto a 3D real y debería intentarse
+  > **antes** que cualquier driver de GPU con aceleración.
+  >
+  > Si algún día se aborda aceleración real: **OpenGL ES primero**
+  > (spec más acotada, Mesa como referencia para verificar cada
+  > función, mismo método que ya usamos con los registros de
+  > AHCI/RTL8139) — Vulkan queda como aspiración mucho más lejana
+  > (spec de miles de páginas; Mesa tardó años con equipo grande solo
+  > en RADV), con AMDVLK como referencia cuando llegue ese momento.
 
 ## Convención de syscalls
 
