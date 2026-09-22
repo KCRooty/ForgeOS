@@ -1,0 +1,184 @@
+# TODO maestro — todo lo que falta para un OS completo
+
+Organizado por capa. ✅ = ya construido (aunque sin verificar en QEMU).
+Todo lo demás falta. Esto es el inventario completo, no una selección.
+
+---
+
+## 1. Núcleo del kernel (Ring 0, bajo nivel)
+
+- ✅ Boot Multiboot2 → Long Mode
+- ✅ GDT/TSS
+- ✅ IDT + 6 excepciones de CPU
+- ✅ PIC 8259 remapeado
+- ✅ Allocador físico de páginas (bitmap)
+- ✅ Heap del kernel (bump allocator v1, sin free real)
+- ✅ Framebuffer + texto básico
+- ❌ **Heap real con free-list** (M2b, ya anotado)
+- ❌ **APIC local + I/O APIC** — el PIC legacy que tenemos no basta para
+  SMP ni para IRQ routing moderno; hace falta para todo lo que viene
+  después (timer preciso, multi-core, USB, red con interrupciones)
+- ❌ **Timer del sistema** — PIT y/o APIC timer calibrado, tick de
+  uptime real (ahora mismo no hay ninguna noción de tiempo transcurrido)
+- ❌ **Driver RTC** (reloj de pared — hora/fecha real, ya mencionado)
+- ❌ **Gestor de memoria virtual completo** — hoy solo hay identity-map
+  fijo montado en boot.asm; falta una API real desde Rust para
+  mapear/desmapear páginas arbitrarias, imprescindible para procesos
+  con su propio espacio de direcciones
+- ❌ **Primitivas de sincronización** — spinlocks, mutex, semáforos;
+  sin esto, SMP y cualquier estructura compartida son una bomba de
+  relojería
+- ❌ **SMP** — arranque de cores adicionales (INIT/SIPI), estructuras
+  per-CPU, scheduler independiente por core
+- ❌ **PCI enumeration** — requisito de CUALQUIER driver real (red,
+  disco, GPU, audio) — nada de HAL funciona sin esto primero
+
+## 2. Procesos, scheduling y syscalls reales (M4)
+
+- ❌ **PCB (Process Control Block)** — estructura real de proceso, con
+  su `Capabilities` (ya tenemos el tipo, falta usarlo de verdad)
+- ❌ **Scheduler** — round-robin como mínimo, weighted más adelante
+- ❌ **Context switch** — guardar/restaurar registros, FPU/SSE state
+- ❌ **fork() / execve() reales** — con carga de ELF64 propio
+- ❌ **wait()/exit()** — recolección de procesos zombie
+- ❌ **Señales** (signals) — al menos SIGKILL/SIGTERM/SIGSEGV
+- ❌ **Dispatcher de syscalls real** — el punto donde `caps::enforce`
+  se vuelve operativo por primera vez, no solo demo
+- ❌ **IPC** — pipes como mínimo; mailbox/mensajería como en
+  Asmodeus14/Nyx es buen precedente
+- ❌ **Memoria compartida (SHM)** — necesaria más adelante para el
+  compositor gráfico (ventanas cliente)
+
+## 3. Filesystem (M5)
+
+- ❌ **VFS** — capa de abstracción, trait `FileSystem`, tabla de montaje
+- ❌ **Initramfs/tarfs** — para arrancar userland antes de tener disco
+  real montado (patrón usado por los dos Nyx)
+- ❌ **Filesystem persistente real** — ext2 es la opción pragmática
+  (compatible con herramientas externas de Linux para depurar discos
+  desde fuera), o diseñar uno propio — decisión pendiente
+- ❌ **/proc y /dev sintéticos** — Windows y Linux los dan por hecho
+  (info de procesos navegable, nodos de dispositivo) — sin esto no se
+  siente "como Windows y Linux" ni de lejos
+- ❌ **Tabla de descriptores de fichero por proceso**
+
+## 4. HAL — drivers de hardware
+
+- ❌ **Almacenamiento**: AHCI (SATA), luego NVMe
+- ❌ **Red**: driver Ethernet (RTL8139, emulable en QEMU) → ARP/IP/ICMP
+  → UDP/TCP → DHCP/DNS → sockets BSD (`socket`/`connect`/`bind`/...) →
+  WiFi (mucho más difícil, firmware de vendor)
+- ❌ **USB**: xHCI → HID (teclado/ratón USB, no solo PS/2) → almacenamiento
+  masivo USB
+- ❌ **Input PS/2**: teclado y ratón — hoy no hay ningún driver de
+  entrada, todo lo que hemos probado es por puerto serie
+- ❌ **Audio**: Sound Blaster 16 (emulable en QEMU) → HDA (hardware real
+  moderno)
+- ❌ **ACPI**: parsing de tablas, apagado/reinicio limpio, gestión
+  térmica — sin esto no hay ni siquiera un `shutdown` decente
+- ❌ **Gráficos**: todo el roadmap de `ARCHITECTURE.md` (framebuffer →
+  virtio-gpu → Intel real → AMD → NVIDIA → ARM)
+
+## 5. Seguridad, usuarios y autenticación
+
+- ❌ **Primitivas criptográficas** — SHA-256 como mínimo (para hashear
+  contraseñas, verificar paquetes); AES si se quiere algo cifrado en
+  disco más adelante
+- ❌ **RNG real** — RDRAND/RDSEED hardware, o CSPRNG si no está disponible
+- ❌ **Cuentas de usuario** — almacenamiento de credenciales, login
+- ❌ **Pantalla de login** (Anvil)
+- ❌ **`elevate`** — escalar a admin vía capabilities ampliadas,
+  autenticación interactiva, auditoría de cada escalada
+- ❌ **Logging/auditoría** — quién hizo qué y cuándo, básico pero real
+
+## 6. Userland, toolchain y shell
+
+- ❌ **crt0** — arranque de proceso userland, `argv`/`envp`
+- ❌ **libc propia** — malloc/free, `str*`/`mem*`, printf/snprintf,
+  stdio con buffer, ctype
+- ❌ **~50-60 coreutils** — `ls`, `cat`, `cp`, `mv`, `rm`, `ps`, `top`,
+  etc. (referencia directa: los coreutils de nyxos-dev)
+- ❌ **Bellows** (el shell real, M4+) — pipelines, redirección, job
+  control, `&&`/`||`/`;`, quoting, sustitución de comandos
+- ❌ **Gestor de paquetes** (`forge get`/`forge rm`) — decidir
+  binario-primero vs compilar-desde-fuente
+- ❌ **`dlopen`/`dlsym`** — enlazado dinámico, si se quiere en algún
+  momento
+
+## 7. Escritorio — Anvil (M6+)
+
+- ❌ **Compositor core** — ventanas, z-order, drag/resize, damage tracking
+- ❌ **Tiling BSP/dwindle** (ya decidido)
+- ❌ **Dos barras** (superior macOS/KDE-style, inferior Windows-style —
+  ya decidido)
+- ❌ **Wallpaper**
+- ❌ **Launcher / menú de inicio**
+- ❌ **Notificaciones**
+- ❌ **Syscalls de ventana** — diseño propio tipo `SYS_WIN_CREATE`/
+  `PRESENT`/`POLL_EVENT` (referencia: nyxos-dev)
+- ❌ **Cursor de ratón** — renderizado, no solo posición
+- ❌ **Fuente proporcional real** — el 8x8 de bloque actual es solo
+  para debug; hace falta algo tipo TTF más adelante (como hizo
+  nyxos-dev con DejaVu Sans) o al menos completar el alfabeto bitmap
+- ❌ **Portapapeles** (clipboard)
+
+## 8. Apps (todas viven dentro de Anvil, M6+)
+
+- ❌ **Crucible** (terminal)
+- ❌ **Gestor de archivos**
+- ❌ **Editor de texto**
+- ❌ **Visor de imágenes** (necesita decodificadores PNG/BMP/GIF mínimo)
+- ❌ **Reproductor multimedia básico** — antes de pensar en VLC
+- ❌ **Ajustes del sistema**
+- ❌ **Monitor del sistema** (CPU/memoria/procesos — tipo Task Manager)
+- ❌ **Gestor de red** (UI sobre el stack de red del punto 4)
+- ❌ **Calculadora** (trivial pero esperado)
+
+## 9. Multimedia (transversal)
+
+- ❌ **Decodificadores de imagen propios** — PNG/BMP/GIF mínimo, JPEG
+  más adelante (referencia: nyxos-dev tiene los cuatro desde cero)
+- ❌ **Pipeline de audio** — reproducción básica sobre el driver de
+  audio del punto 4
+- ❌ **Decodificación de vídeo** — mucho más difícil, fuera de alcance
+  cercano (ver `COMPATIBILITY.md` para VLC como candidato de port nativo)
+
+## 10. Estabilidad y QA
+
+- ❌ **Batería de tests KAT en CI** — principio ya escrito en
+  `PHILOSOPHY.md`, pero no hay ni un solo test automatizado todavía
+- ❌ **Pantalla de pánico gráfica** — hoy un panic solo cuelga y loguea
+  por serie; Windows tiene BSOD, Linux tiene el panic de consola, los
+  dos Nyx tienen pantalla de pánico gráfica — nosotros no tenemos nada
+  visual todavía
+
+## 11. Instalador (esto no lo habías pedido, pero hace falta)
+
+- ❌ **Instalador real a disco persistente** — hoy Forge OS solo
+  arranca en vivo desde el ISO; no hay forma de instalarlo de forma
+  permanente en una máquina. Sin esto no es un "sistema operativo" en
+  el sentido que tú quieres, es un live-CD para siempre.
+- ❌ **Parser de tabla de particiones** (GPT/MBR)
+- ❌ **Instalación del bootloader** en el disco de destino
+
+## 12. Cosas que no has pedido pero "como Windows y Linux" las exige
+
+- ❌ **Localización / distribución de teclado** — español, dado que
+  trabajas en español/catalán (nyxos-dev incluso lo tiene documentado
+  en su `nyxfetch` — "Keymap: Spanish (ES)")
+- ❌ **Zonas horarias**
+- ❌ **Mecanismo de actualización del propio sistema operativo**
+- ❌ **Snapshots/backups del sistema** (tipo Time Machine o restore
+  points de Windows) — nice-to-have, no bloqueante
+- ❌ **Arranque seguro / cadena de confianza** — encaja con el perfil
+  "Hardened" ya definido en `PRODUCT.md`
+
+---
+
+## Por dónde seguir
+
+Casi todo lo de las secciones 2-9 depende, directa o indirectamente, de
+**M4 (procesos y scheduler)** — es el bloqueante más grande de todo el
+tablero. Sin procesos reales no hay shell real, no hay apps, no hay
+gestor de paquetes, no hay nada que "corra" de verdad más allá de lo que
+ya hace el propio kernel.
