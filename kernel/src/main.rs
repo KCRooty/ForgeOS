@@ -18,6 +18,7 @@ mod framebuffer;
 mod gdt;
 mod heap;
 mod idt;
+mod keyboard;
 mod mb2;
 mod pci;
 mod pic;
@@ -51,6 +52,8 @@ pub extern "C" fn kernel_main_upper(mb2_info_ptr: u64) -> ! {
 
     pic::init();
     serial_println!("[pic] remapeado a vectores 32-47, todo enmascarado (sin drivers de IRQ aún)");
+
+    keyboard::init(); // desenmascara IRQ1 — no llegará nada hasta el `sti` de más abajo
 
     // M2 — allocador físico + heap del kernel.
     unsafe { pmm::init(mb2_info_ptr) };

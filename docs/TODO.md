@@ -83,8 +83,10 @@ Todo lo demás falta. Esto es el inventario completo, no una selección.
   WiFi (mucho más difícil, firmware de vendor)
 - ❌ **USB**: xHCI → HID (teclado/ratón USB, no solo PS/2) → almacenamiento
   masivo USB
-- ❌ **Input PS/2**: teclado y ratón — hoy no hay ningún driver de
-  entrada, todo lo que hemos probado es por puerto serie
+- ✅ **Input PS/2 (teclado)** *borrador sin verificar* — scancodes Set
+  1, layout US QWERTY (`keyboard.rs`), IRQ1 vía APIC/PIC, buffer
+  circular, integrado en la consola de depuración junto al puerto serie
+- ❌ **Input PS/2 (ratón)** — solo teclado por ahora
 - ❌ **Audio**: Sound Blaster 16 (emulable en QEMU) → HDA (hardware real
   moderno)
 - ❌ **ACPI**: parsing de tablas, apagado/reinicio limpio, gestión
