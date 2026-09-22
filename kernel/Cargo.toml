@@ -1,0 +1,22 @@
+[package]
+name = "forge-kernel"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+crate-type = ["staticlib"]
+
+[[bin]]
+name = "forge-kernel"
+path = "src/main.rs"
+
+[dependencies]
+# Sin dependencias externas todavía a propósito — M0 es cero-libs,
+# igual que el arranque de los dos Nyx que estudiamos.
+
+[profile.dev]
+panic = "abort"
+
+[profile.release]
+panic = "abort"
+lto = true
