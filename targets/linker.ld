@@ -1,11 +1,19 @@
 ENTRY(_start)
 
-KERNEL_VMA = 0xFFFFFFFF80000000;
-KERNEL_LMA = 0x00100000;
+/* Multiboot2 exige que el kernel se cargue a partir de 1 MiB. */
+KERNEL_BASE = 0x00100000;
+
+/* NOTA (M2): kernel "flat" — virtual == físico — a propósito.
+ * boot.asm (M0) solo monta identity-map del primer GiB; un layout
+ * higher-half (PML4[511], como se planteó al principio) necesita mapeo
+ * de páginas adicional que no tiene sentido escribir a mano sin
+ * compilador+QEMU delante para validarlo. Migrar a higher-half real es
+ * tarea futura una vez exista ese feedback loop — ver docs/ARCHITECTURE.md.
+ */
 
 SECTIONS
 {
-    . = KERNEL_LMA;
+    . = KERNEL_BASE;
 
     .boot ALIGN(4K) :
     {
@@ -15,24 +23,11 @@ SECTIONS
         *(.boot.bss)
     }
 
-    . += KERNEL_VMA;
+    .text ALIGN(4K) : { *(.text .text.*) }
+    .rodata ALIGN(4K) : { *(.rodata .rodata.*) }
+    .data ALIGN(4K) : { *(.data .data.*) }
 
-    .text ALIGN(4K) : AT(ADDR(.text) - KERNEL_VMA)
-    {
-        *(.text .text.*)
-    }
-
-    .rodata ALIGN(4K) : AT(ADDR(.rodata) - KERNEL_VMA)
-    {
-        *(.rodata .rodata.*)
-    }
-
-    .data ALIGN(4K) : AT(ADDR(.data) - KERNEL_VMA)
-    {
-        *(.data .data.*)
-    }
-
-    .bss ALIGN(4K) : AT(ADDR(.bss) - KERNEL_VMA)
+    .bss ALIGN(4K) :
     {
         __bss_start = .;
         *(COMMON)

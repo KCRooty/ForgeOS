@@ -3,6 +3,18 @@
 Ver [PHILOSOPHY.md](PHILOSOPHY.md) para el razonamiento detrás de cada
 decisión. Este documento es el mapa técnico.
 
+## Nota de arquitectura: kernel flat, no higher-half (por ahora)
+
+El diseño original planteaba un kernel higher-half (`0xFFFFFFFF80000000`,
+patrón `PML4[511]` como en nyxos-dev). Al escribir M2 se detectó que
+`boot.asm` (M0) solo monta identity-map del primer GiB — nunca mapea ese
+rango higher-half — lo que habría causado un page fault inmediato al
+saltar del boot a Rust. Corregido bajando el kernel a direcciones flat
+(virtual == físico, `KERNEL_BASE = 0x100000`) en `targets/linker.ld`.
+Migrar a higher-half real es tarea futura, deliberadamente pospuesta hasta
+tener un ciclo de compilación+QEMU real para validar el mapeo de páginas
+adicional sin adivinar aritmética de bits a ciegas.
+
 ## Las tres capas
 
 **Kernel** (`kernel/src/`, módulos base) — scheduler, interrupciones, locks,
@@ -49,8 +61,14 @@ Categorías actuales (`CapMask`, `u32`, una por bit):
 - **M1c** ✅ *borrador sin verificar* — PIC 8259 remapeado (IRQ0-7 →
   vectores 32-39, IRQ8-15 → 40-47), todo enmascarado hasta que existan
   drivers reales que las atiendan
-- **M2** — allocador físico de páginas, heap del kernel, primer dispatcher
-  de syscalls real (aquí `caps::enforce` se vuelve operativo)
+- **M2** ✅ *borrador sin verificar* — parser mínimo de tags Multiboot2
+  (`mb2.rs`), allocador físico de páginas por bitmap (`pmm.rs`), heap del
+  kernel vía bump allocator (`heap.rs`) con `#[global_allocator]` real y
+  prueba end-to-end (`Box::new`)
+- **M2b** — heap real con free-list (recuperar memoria liberada, no solo
+  avanzar un puntero)
+- **M2c** — primer dispatcher de syscalls real (aquí `caps::enforce` se
+  vuelve operativo)
 - **M3** — framebuffer (tag de vídeo Multiboot2) + texto en pantalla
 - **M4** — scheduler + tabla de procesos con `Capabilities` por proceso;
   Object Manager
