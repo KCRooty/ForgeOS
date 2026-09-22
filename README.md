@@ -12,7 +12,7 @@ Ver [docs/PHILOSOPHY.md](docs/PHILOSOPHY.md) (diseño técnico) y
 [docs/PRODUCT.md](docs/PRODUCT.md) (a quién sirve y por qué) para el
 razonamiento completo detrás de cada decisión.
 
-## Estado: parser de fuentes PSF1 añadido — falta el fichero de fuente en sí, sin verificar en QEMU (en construcción)
+## Estado: AHCI real — IDENTIFY DEVICE emitido, modelo de disco leído, sin verificar en QEMU (en construcción)
 
 ## Referencias de arquitectura estudiadas
 - Asmodeus14/Nyx (Rust, QCLang, motor 3D Gen9.5 hand-rolled)

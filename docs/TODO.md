@@ -86,11 +86,13 @@ Todo lo demás falta. Esto es el inventario completo, no una selección.
 
 ## 4. HAL — drivers de hardware
 
-- ✅ **Almacenamiento — AHCI (detección)** *borrador sin verificar* —
-  controlador encontrado por PCI, ABAR mapeado, puertos implementados
-  y dispositivo en cada uno (SATA/ATAPI) vía PxSSTS/PxSIG. **Sin
-  comandos reales todavía** — IDENTIFY DEVICE y lectura/escritura de
-  sectores necesitan Command List + FIS + PRDT, pasada aparte
+- ✅ **Almacenamiento — AHCI (comandos reales)** *borrador sin
+  verificar* — Command List + Command Table + FIS H2D, `IDENTIFY
+  DEVICE` emitido de verdad en el slot 0, modelo del disco extraído y
+  parseado. Registros verificados contra Linux; formato de FIS/Command
+  Table es estándar de hardware universal (no específico de ningún
+  driver). **Todavía sin lectura/escritura de sectores reales** (READ
+  DMA/WRITE DMA) — ese es el siguiente paso natural de AHCI
 - ❌ **Almacenamiento — NVMe**
 - ✅ **Red — RTL8139 (detección + MAC)** *borrador sin verificar* —
   chip encontrado por PCI, despertado, soft reset, MAC de fábrica
