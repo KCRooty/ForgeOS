@@ -1,7 +1,20 @@
 # TODO maestro — todo lo que falta para un OS completo
 
-Organizado por capa. ✅ = ya construido (aunque sin verificar en QEMU).
-Todo lo demás falta. Esto es el inventario completo, no una selección.
+Organizado por capa. ✅ = ya construido (aunque sin verificar en QEMU,
+salvo que se indique lo contrario). Todo lo demás falta. Esto es el
+inventario completo, no una selección.
+
+**Actualización — primer boot real (Claude Code, sobre este repo):**
+el kernel compila y arranca de verdad en QEMU por primera vez. Llega
+hasta la consola de depuración (`forge>`) con MMU, espacio de
+direcciones por proceso (CR3 real), VFS y pipes confirmados
+funcionando, no solo revisados por lectura. Se encontró y arregló un
+bug real: `mmu::map_page` ponía el bit NO_EXECUTE sin que `EFER.NXE`
+estuviera habilitado, lo que crasheaba el boot con un page fault por
+reserved-bit violation — ver `mmu::init()`. El único fallo que queda
+del boot es ya conocido y deliberado: el loader ELF no puede partir
+huge pages todavía, así que `TEST_ELF` no llega a cargar (anotado en
+`mmu.rs` desde el principio, no es nuevo).
 
 ---
 
