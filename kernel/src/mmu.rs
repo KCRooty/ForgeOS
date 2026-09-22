@@ -21,6 +21,7 @@ use crate::pmm;
 
 const PAGE_PRESENT: u64 = 1 << 0;
 const PAGE_WRITABLE: u64 = 1 << 1;
+const PAGE_USER: u64 = 1 << 2;
 const PAGE_HUGE: u64 = 1 << 7;
 const PAGE_NO_EXECUTE: u64 = 1 << 63;
 const ADDR_MASK: u64 = 0x000F_FFFF_FFFF_F000;
@@ -68,16 +69,47 @@ fn table_index(virt: u64, level: u8) -> usize {
     ((virt >> (12 + 9 * level as u64)) & 0x1FF) as usize
 }
 
+/// Convierte una huge page de 2 MiB (entrada P2 con `PAGE_HUGE`) en una
+/// tabla P1 normal de 512 entradas de 4 KiB que cubren exactamente el
+/// mismo rango físico. No mueve ni copia memoria — la RAM identity-
+/// mapeada sigue siendo la misma, solo cambia la granularidad con la
+/// que está descrita. Solo válido para huge pages de 2 MiB (nivel P2);
+/// nunca se llama para P3 — ver comentario en `get_or_create_next`.
+unsafe fn split_huge_page(huge_entry: u64) -> Option<u64> {
+    let huge_phys = huge_entry & ADDR_MASK;
+    let leaf_flags = (huge_entry & !ADDR_MASK) & !PAGE_HUGE;
+
+    let new_table = pmm::alloc_frame()?;
+    for i in 0..512u64 {
+        let entry_ptr = (new_table + i * 8) as *mut u64;
+        *entry_ptr = (huge_phys + i * 4096) | leaf_flags;
+    }
+    Some(new_table)
+}
+
 /// Lee la entrada `table_phys[index]`; si no está presente, crea una
-/// tabla nueva (frame limpio) y la enlaza. Falla si la entrada ya
-/// existe pero es una huge page (no podemos tratarla como tabla).
-unsafe fn get_or_create_next(table_phys: u64, index: usize, flags: u64) -> Result<u64, &'static str> {
+/// tabla nueva (frame limpio) y la enlaza. Si ya existe pero es una
+/// huge page, la parte con `split_huge_page` — pero SOLO si
+/// `allow_split` es cierto. En este diseño las únicas huge pages son
+/// las 2 MiB de `boot.asm` a nivel P2 (ver `docs/ARCHITECTURE.md`), así
+/// que `map_page_in` solo pasa `allow_split=true` en la llamada que
+/// camina de P2 a P1 — las llamadas P4→P3 y P3→P2 lo dejan en `false`
+/// a propósito: una huge page ahí sería de 1 GiB (nivel P3), que este
+/// partidor NO sabe trocear (asume 2 MiB / 512 = 4 KiB), y este sistema
+/// nunca las crea, así que fallar explícitamente sigue siendo lo
+/// correcto en ese caso.
+unsafe fn get_or_create_next(table_phys: u64, index: usize, flags: u64, allow_split: bool) -> Result<u64, &'static str> {
     let entry_ptr = (table_phys + (index as u64) * 8) as *mut u64;
     let entry = *entry_ptr;
 
     if entry & PAGE_PRESENT != 0 {
         if entry & PAGE_HUGE != 0 {
-            return Err("el camino pasa por una huge page existente — partirla no está implementado en esta pasada");
+            if !allow_split {
+                return Err("el camino pasa por una huge page existente — partirla no está implementado en esta pasada");
+            }
+            let new_table = split_huge_page(entry).ok_or("sin memoria física para partir la huge page")?;
+            *entry_ptr = new_table | PAGE_PRESENT | flags;
+            return Ok(new_table);
         }
         return Ok(entry & ADDR_MASK);
     }
@@ -102,13 +134,23 @@ pub unsafe fn map_page_in(p4: u64, virt: u64, phys: u64, writable: bool, executa
         return Err("virt/phys deben estar alineados a 4 KiB");
     }
 
-    let inter_flags = PAGE_PRESENT | PAGE_WRITABLE; // tablas intermedias siempre RW
+    // PAGE_USER en las tablas intermedias TAMBIÉN, no solo en la hoja:
+    // el bit U/S se exige en TODOS los niveles del camino para que una
+    // CPU en ring 3 pueda completar la traducción — si cualquier
+    // ancestro es supervisor-only, el acceso de usuario falla ahí,
+    // sin importar los permisos de la página final. `map_page_in` solo
+    // se usa hoy para memoria de proceso (segmentos ELF, pilas de
+    // usuario) — nunca para mapeos kernel-only — así que marcar todo
+    // como accesible desde ring 3 es correcto para el uso actual; si
+    // algún día hace falta un mapeo privado del kernel por esta vía,
+    // esto necesitará un parámetro `user: bool` explícito.
+    let inter_flags = PAGE_PRESENT | PAGE_WRITABLE | PAGE_USER;
 
-    let p3 = get_or_create_next(p4, table_index(virt, 3), inter_flags)?;
-    let p2 = get_or_create_next(p3, table_index(virt, 2), inter_flags)?;
-    let p1 = get_or_create_next(p2, table_index(virt, 1), inter_flags)?;
+    let p3 = get_or_create_next(p4, table_index(virt, 3), inter_flags, false)?;
+    let p2 = get_or_create_next(p3, table_index(virt, 2), inter_flags, false)?;
+    let p1 = get_or_create_next(p2, table_index(virt, 1), inter_flags, true)?;
 
-    let mut leaf_flags = PAGE_PRESENT;
+    let mut leaf_flags = PAGE_PRESENT | PAGE_USER;
     if writable {
         leaf_flags |= PAGE_WRITABLE;
     }
@@ -148,6 +190,74 @@ pub unsafe fn create_address_space() -> Option<u64> {
     Some(new_p4)
 }
 
+/// Clona recursivamente una subtabla (P3/P2/P1) y su contenido.
+/// `level` = 2 para P3, 1 para P2, 0 para P1 (hojas: páginas de 4 KiB
+/// de datos reales, se copian byte a byte). Una huge page (P2 con
+/// PAGE_HUGE) no debería aparecer bajo P4[1..=255] en este diseño —
+/// todo lo privado de un proceso se mapea vía `map_page_in`, que nunca
+/// crea huge pages — pero por seguridad, si aparece una, se comparte
+/// la entrada tal cual en vez de intentar copiar 2 MiB o fallar.
+unsafe fn clone_subtree(src_table: u64, level: u8) -> Option<u64> {
+    let new_table = pmm::alloc_frame()?;
+    core::ptr::write_bytes(new_table as *mut u8, 0, 4096);
+
+    for i in 0..512usize {
+        let src_entry = *((src_table + (i as u64) * 8) as *const u64);
+        if src_entry & PAGE_PRESENT == 0 {
+            continue;
+        }
+        let flags = src_entry & !ADDR_MASK;
+        let dst_entry_ptr = (new_table + (i as u64) * 8) as *mut u64;
+
+        if level == 0 {
+            // Hoja: página de datos de 4 KiB — copia real del contenido.
+            let new_frame = pmm::alloc_frame()?;
+            let src_phys = src_entry & ADDR_MASK;
+            core::ptr::copy_nonoverlapping(src_phys as *const u8, new_frame as *mut u8, 4096);
+            *dst_entry_ptr = new_frame | flags;
+        } else if src_entry & PAGE_HUGE != 0 {
+            // Huge page inesperada aquí — se comparte, no se parte.
+            *dst_entry_ptr = src_entry;
+        } else {
+            let child_phys = src_entry & ADDR_MASK;
+            let new_child = clone_subtree(child_phys, level - 1)?;
+            *dst_entry_ptr = new_child | flags;
+        }
+    }
+
+    Some(new_table)
+}
+
+/// Crea un espacio de direcciones nuevo con una COPIA PROFUNDA de todo
+/// lo privado del proceso origen (`P4[1..=255]`) — no solo la
+/// estructura de tablas, también el contenido de cada página de datos.
+/// Necesario para `fork()`: el hijo debe tener su propia memoria, no
+/// compartir las páginas del padre (eso sería `vfork`/COW, fuera de
+/// alcance de esta pasada — ver cabecera del módulo). `P4[0]`
+/// (kernel/identity-map) se comparte igual que en `create_address_space`,
+/// nunca se clona: es la misma memoria física para todos los procesos
+/// por diseño.
+pub unsafe fn clone_address_space(src_p4: u64) -> Option<u64> {
+    let new_p4 = pmm::alloc_frame()?;
+    core::ptr::write_bytes(new_p4 as *mut u8, 0, 4096);
+
+    // P4[0]: compartido, igual que create_address_space.
+    *(new_p4 as *mut u64) = *(src_p4 as *const u64);
+
+    for i in 1..512usize {
+        let src_entry = *((src_p4 + (i as u64) * 8) as *const u64);
+        if src_entry & PAGE_PRESENT == 0 {
+            continue;
+        }
+        let flags = src_entry & !ADDR_MASK;
+        let child_phys = src_entry & ADDR_MASK;
+        let new_child = clone_subtree(child_phys, 2)?;
+        *((new_p4 + (i as u64) * 8) as *mut u64) = new_child | flags;
+    }
+
+    Some(new_p4)
+}
+
 /// Cambia el espacio de direcciones activo. `p4` debe ser una
 /// dirección física de una tabla PML4 válida (típicamente devuelta por
 /// `create_address_space`).
@@ -182,11 +292,26 @@ pub unsafe fn translate(p4: u64, virt: u64) -> Option<u64> {
     }
     let p2 = p2_entry & ADDR_MASK;
 
+    // `p1_entry` aquí es la entrada de P2 que apunta a la TABLA P1 —
+    // todavía no es la hoja. Faltaba este último nivel de indirección
+    // (BUG real: `translate()` solo caminaba 3 niveles — P4→P3→P2 — y
+    // trataba el puntero a la tabla P1 como si ya fuera la página de
+    // datos final. Efecto observado: `copy_into_segment` escribía el
+    // contenido de cada ELF cargado ENCIMA de su propia tabla P1 en vez
+    // de en la página de código/datos real — silencioso mientras nadie
+    // ejecutara el ELF cargado, y un page fault con bit RSVD en cuanto
+    // `forktest` intentó saltar de verdad al entry point).
     let p1_entry = *((p2 + (table_index(virt, 1) as u64) * 8) as *const u64);
     if p1_entry & PAGE_PRESENT == 0 {
         return None;
     }
-    Some((p1_entry & ADDR_MASK) + (virt & 0xFFF))
+    let p1 = p1_entry & ADDR_MASK;
+
+    let leaf_entry = *((p1 + (table_index(virt, 0) as u64) * 8) as *const u64);
+    if leaf_entry & PAGE_PRESENT == 0 {
+        return None;
+    }
+    Some((leaf_entry & ADDR_MASK) + (virt & 0xFFF))
 }
 
 /// Desmapea una página de 4 KiB previamente mapeada con `map_page`.

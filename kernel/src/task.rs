@@ -49,6 +49,7 @@ impl Context {
     }
 }
 
+#[derive(PartialEq, Eq, Clone, Copy)]
 pub enum TaskState {
     Ready,
     Running,

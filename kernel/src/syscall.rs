@@ -14,8 +14,14 @@
 //! pedir memoria...) — no terminan el proceso, vuelven a él.
 
 use crate::caps;
+use crate::elf;
 use crate::gdt;
+use crate::mmu;
+use crate::process;
+use crate::ring3;
+use crate::scheduler;
 use crate::serial_println;
+use crate::vfs;
 
 const IA32_EFER: u32 = 0xC000_0080;
 const IA32_STAR: u32 = 0xC000_0081;
@@ -35,11 +41,24 @@ static mut SYSCALL_STACK_TOP: u64 = 0;
 static mut USER_RSP_SCRATCH: u64 = 0;
 
 pub const SYS_PING: u64 = 1;
+// Numeración compatible con Linux x86_64 donde aplica — ya documentado
+// en ARCHITECTURE.md §Convención de syscalls.
+pub const SYS_GETPID: u64 = 39;
+pub const SYS_FORK: u64 = 57;
+pub const SYS_EXECVE: u64 = 59;
+pub const SYS_EXIT: u64 = 60;
 
 /// Argumentos de una syscall, en el orden `syscall/sysret` de Linux
 /// x86_64 (RAX=número, RDI/RSI/RDX/R10/R8/R9=args) — ya documentado en
 /// `ARCHITECTURE.md` §Convención de syscalls, esto es la primera vez
 /// que se implementa de verdad.
+///
+/// `user_rflags`/`user_rip` son los dos últimos valores que empuja
+/// `syscall_entry` (`r11`/`rcx`, puestos por la propia instrucción
+/// `syscall`) — no forman parte de la convención de argumentos, pero
+/// hacen falta para fabricar el punto de retorno del hijo de `fork()`
+/// (ver `sys_fork`): el hijo no llega a ring 3 vía `sysretq` normal, así
+/// que necesitamos saber a mano dónde reanudarlo.
 #[repr(C)]
 pub struct SyscallFrame {
     pub num: u64,
@@ -49,7 +68,19 @@ pub struct SyscallFrame {
     pub arg3: u64,
     pub arg4: u64,
     pub arg5: u64,
+    pub user_rflags: u64,
+    pub user_rip: u64,
 }
+
+/// Handoff para el hijo de `fork()` — el mismo patrón de "slot global
+/// único" que `USER_RSP_SCRATCH`: solo soporta un `fork()` en vuelo a
+/// la vez (cooperativo, sin SMP, ver `docs/MEGADOC.md` §errores
+/// conocidos). El trampolín que arranca la tarea del hijo en el
+/// scheduler lee esto inmediatamente, antes de que un `fork()`
+/// distinto pueda pisarlo.
+static mut FORK_CHILD_PID: u64 = 0;
+static mut FORK_CHILD_RIP: u64 = 0;
+static mut FORK_CHILD_RSP: u64 = 0;
 
 unsafe fn read_msr(msr: u32) -> u64 {
     let (hi, lo): (u32, u32);
@@ -152,9 +183,201 @@ extern "C" fn syscall_dispatch(frame: *mut SyscallFrame) -> u64 {
             );
             0xC0FFEE
         }
+        SYS_GETPID => process::current_pid(),
+        SYS_FORK => {
+            if let Err(v) = caps::enforce_current(caps::CAP_EXEC) {
+                serial_println!(
+                    "[syscall] SYS_FORK DENEGADO — pedido=0x{:x}, otorgado=0x{:x} (falta CAP_EXEC)",
+                    v.requested,
+                    v.granted
+                );
+                return u64::MAX;
+            }
+            sys_fork(frame)
+        }
+        SYS_EXECVE => {
+            if let Err(v) = caps::enforce_current(caps::CAP_EXEC) {
+                serial_println!(
+                    "[syscall] SYS_EXECVE DENEGADO — pedido=0x{:x}, otorgado=0x{:x} (falta CAP_EXEC)",
+                    v.requested,
+                    v.granted
+                );
+                return u64::MAX;
+            }
+            sys_execve(frame)
+        }
+        SYS_EXIT => sys_exit(frame),
         other => {
             serial_println!("[syscall] número desconocido: {}", other);
             u64::MAX
         }
+    }
+}
+
+/// `fork()` — clona el proceso actual: nuevo PID, copia profunda del
+/// espacio de direcciones (`mmu::clone_address_space`), y una tarea de
+/// scheduler nueva para el hijo. El padre recibe el PID del hijo por
+/// el camino normal (el valor de retorno de esta función se convierte
+/// en `rax` en `syscall_entry`, vía `sysretq`, igual que `SYS_PING`).
+/// El hijo NO vuelve por aquí — arranca en `fork_child_trampoline`,
+/// ver su comentario.
+fn sys_fork(frame: &SyscallFrame) -> u64 {
+    let parent_pid = process::current_pid();
+    let parent = match process::find(parent_pid) {
+        Some(p) => p,
+        None => {
+            serial_println!(
+                "[syscall] fork: PID actual ({}) no está registrado en la tabla de procesos",
+                parent_pid
+            );
+            return u64::MAX;
+        }
+    };
+
+    let child_p4 = match unsafe { mmu::clone_address_space(parent.page_table) } {
+        Some(p4) => p4,
+        None => {
+            serial_println!("[syscall] fork: sin memoria física para clonar el espacio de direcciones");
+            return u64::MAX;
+        }
+    };
+
+    let child_pid = process::alloc_pid();
+    process::register(child_pid, parent_pid, child_p4);
+
+    // Handoff de un solo slot hacia fork_child_trampoline — ver su
+    // aviso de "un fork en vuelo a la vez".
+    unsafe {
+        FORK_CHILD_PID = child_pid;
+        FORK_CHILD_RIP = frame.user_rip;
+        FORK_CHILD_RSP = USER_RSP_SCRATCH;
+    }
+    scheduler::spawn_with_space(fork_child_trampoline, child_p4);
+
+    serial_println!(
+        "[syscall] fork: PID {} -> hijo PID {} (PML4 nuevo @ 0x{:x})",
+        parent_pid,
+        child_pid,
+        child_p4
+    );
+
+    child_pid
+}
+
+/// Punto de entrada del hijo de `fork()` como tarea nueva del
+/// scheduler. No llega aquí por `sysretq` (nunca ejecutó `syscall` él
+/// mismo) — por eso hace falta `enter_ring3_with_rax` en vez del
+/// camino normal: fabrica desde cero el mismo punto de retorno que
+/// tendría el padre (mismo RIP/RSP de usuario, capturados en
+/// `sys_fork` desde el `SyscallFrame`/`USER_RSP_SCRATCH` del padre),
+/// pero con `rax=0` — la convención de `fork()` para el hijo.
+fn fork_child_trampoline() -> ! {
+    unsafe {
+        let pid = FORK_CHILD_PID;
+        let rip = FORK_CHILD_RIP;
+        let rsp = FORK_CHILD_RSP;
+        process::set_current_pid(pid);
+        ring3::enter_ring3_with_rax(rip, rsp, 0);
+    }
+}
+
+/// `exit()` — marca el proceso actual como zombie y cede el turno para
+/// siempre. No hay `wait()` todavía (ver TODO.md), así que el zombie
+/// se queda zombie — suficiente para probar que `exit()` termina el
+/// proceso de verdad y no vuelve a ejecutarse.
+fn sys_exit(frame: &SyscallFrame) -> ! {
+    let pid = process::current_pid();
+    let code = frame.arg0 as i32;
+    process::mark_zombie(pid, code);
+    serial_println!("[syscall] exit: PID {} terminó con código {}", pid, code);
+    scheduler::mark_current_finished();
+    // `exit()` diverge a propósito: nunca llega al `sysretq` de
+    // `syscall_entry`, que es donde normalmente se restaura RFLAGS (y
+    // con él, IF) desde `r11`. `syscall_entry` enmascara IF vía FMASK
+    // nada más entrar — sin este `sti`, las interrupciones quedan
+    // desactivadas PARA SIEMPRE en cuanto cualquier proceso llama a
+    // `exit()`, y el `hlt` de `console::read_line()` (que depende de
+    // una interrupción para despertar) se cuelga para siempre, aunque
+    // la CPU no haya crasheado — visto de primera mano: `forktest`
+    // dejaba la consola sin responder a ninguna tecla más.
+    unsafe { core::arch::asm!("sti") };
+    loop {
+        scheduler::yield_now();
+    }
+}
+
+/// `execve()` — reemplaza el proceso actual por un binario nuevo.
+/// `arg0` = puntero (en el espacio de direcciones YA activo del
+/// proceso llamante) a una cadena con el nombre del fichero en el VFS.
+/// Diverge a propósito en el camino de éxito: llama a `enter_ring3`
+/// directamente desde aquí en vez de volver a `syscall_dispatch` — la
+/// pila de kernel de esta syscall queda abandonada (se reutiliza en la
+/// siguiente syscall, `SYSCALL_STACK_TOP` es fijo), y `sysretq` del
+/// handler naked nunca se ejecuta para esta invocación.
+fn sys_execve(frame: &SyscallFrame) -> u64 {
+    let name_ptr = frame.arg0 as *const u8;
+    let mut name_buf = [0u8; 64];
+    let mut len = 0usize;
+    unsafe {
+        while len < name_buf.len() {
+            let b = *name_ptr.add(len);
+            if b == 0 {
+                break;
+            }
+            name_buf[len] = b;
+            len += 1;
+        }
+    }
+    let name = match core::str::from_utf8(&name_buf[..len]) {
+        Ok(s) => s,
+        Err(_) => {
+            serial_println!("[syscall] execve: nombre de fichero no es UTF-8 válido");
+            return u64::MAX;
+        }
+    };
+
+    let bytes = match vfs::read(name) {
+        Some(b) => b,
+        None => {
+            serial_println!("[syscall] execve: '{}' no existe en el VFS", name);
+            return u64::MAX;
+        }
+    };
+
+    let loaded = match elf::load(&bytes) {
+        Ok(l) => l,
+        Err(e) => {
+            serial_println!("[syscall] execve: carga de ELF falló: {}", e);
+            return u64::MAX;
+        }
+    };
+
+    let stack_phys = match unsafe { crate::pmm::alloc_frame() } {
+        Some(f) => f,
+        None => {
+            serial_println!("[syscall] execve: sin memoria física para la pila de usuario");
+            return u64::MAX;
+        }
+    };
+    let user_stack_virt: u64 = 0x0000_0070_0000_0000; // 448 GiB, privado del nuevo espacio
+    if let Err(e) = unsafe { mmu::map_page_in(loaded.page_table, user_stack_virt, stack_phys, true, false) } {
+        serial_println!("[syscall] execve: fallo mapeando la pila de usuario: {}", e);
+        return u64::MAX;
+    }
+    let user_stack_top = user_stack_virt + 4096;
+
+    let pid = process::current_pid();
+    process::set_page_table(pid, loaded.page_table);
+
+    serial_println!(
+        "[syscall] execve: PID {} -> '{}' cargado, entry=0x{:x} (espacio de direcciones reemplazado)",
+        pid,
+        name,
+        loaded.entry_point
+    );
+
+    unsafe {
+        mmu::switch_address_space(loaded.page_table);
+        ring3::enter_ring3(loaded.entry_point, user_stack_top);
     }
 }
