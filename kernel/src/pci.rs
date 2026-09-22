@@ -84,6 +84,43 @@ fn header_type(bus: u8, device: u8, function: u8) -> u8 {
     ((word3 >> 16) & 0xFF) as u8
 }
 
+/// Lee los 6 Base Address Registers (BAR0-BAR5) de una función PCI —
+/// offsets 0x10 a 0x24. Cada BAR nos dice dónde vive la memoria MMIO
+/// (o el rango de puertos I/O) de ese dispositivo. Sin esto, un driver
+/// real no tiene forma de saber a qué dirección escribir.
+///
+/// Bit 0 del BAR distingue el tipo:
+/// - 0 = memory-mapped (BAR con la dirección física en bits 4-31,
+///   bits 1-2 indican si es de 32 o 64 bits)
+/// - 1 = I/O space (dirección de puerto en bits 2-31)
+///
+/// Devolvemos el valor crudo — decodificarlo del todo (tamaño del
+/// rango, si es 64-bit y ocupa dos BARs consecutivos) es tarea del
+/// driver concreto que lo use, cuando exista.
+pub fn read_bars(bus: u8, device: u8, function: u8) -> [u32; 6] {
+    let mut bars = [0u32; 6];
+    for (i, bar) in bars.iter_mut().enumerate() {
+        *bar = read_config(bus, device, function, 0x10 + (i as u8) * 4);
+    }
+    bars
+}
+
+/// `true` si el BAR es de memoria (MMIO), `false` si es de I/O ports.
+pub fn bar_is_memory(bar: u32) -> bool {
+    bar & 0x1 == 0
+}
+
+/// Para un BAR de memoria: la dirección física, con los bits de flags
+/// ya enmascarados fuera.
+pub fn bar_memory_address(bar: u32) -> u64 {
+    (bar & 0xFFFFFFF0) as u64
+}
+
+/// Para un BAR de I/O: el puerto base, con el bit de flag fuera.
+pub fn bar_io_port(bar: u32) -> u16 {
+    (bar & 0xFFFFFFFC) as u16
+}
+
 /// Recorre los 256 buses × 32 dispositivos × 8 funciones posibles.
 /// Fuerza bruta, sin seguir puentes PCI-a-PCI todavía — suficiente para
 /// encontrar lo que QEMU expone por defecto en el bus 0.
@@ -108,7 +145,7 @@ pub fn enumerate(mut on_device: impl FnMut(PciDevice)) {
     }
 }
 
-/// Recorre el bus e imprime lo encontrado por serie.
+/// Recorre el bus e imprime lo encontrado por serie, incluyendo BARs.
 pub fn scan_and_print() {
     let mut count = 0u32;
     enumerate(|dev| {
@@ -124,6 +161,17 @@ pub fn scan_and_print() {
             dev.subclass,
             dev.prog_if
         );
+
+        for (i, &bar) in read_bars(dev.bus, dev.device, dev.function).iter().enumerate() {
+            if bar == 0 {
+                continue; // BAR sin usar
+            }
+            if bar_is_memory(bar) {
+                serial_println!("       BAR{} = MMIO @ 0x{:x}", i, bar_memory_address(bar));
+            } else {
+                serial_println!("       BAR{} = I/O port 0x{:x}", i, bar_io_port(bar));
+            }
+        }
     });
     serial_println!("[pci] {} dispositivo(s) encontrados", count);
 }

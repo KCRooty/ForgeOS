@@ -36,7 +36,8 @@ Todo lo demás falta. Esto es el inventario completo, no una selección.
   per-CPU, scheduler independiente por core
 - ✅ **PCI enumeration** *borrador sin verificar* — mecanismo clásico
   (puertos 0xCF8/0xCFC), recorrido de 256 buses × 32 dispositivos × 8
-  funciones, comando `pci` en la consola de depuración
+  funciones, lectura de BARs (BAR0-BAR5, MMIO vs I/O port), comando
+  `pci` en la consola de depuración
 
 ## 2. Procesos, scheduling y syscalls reales (M4)
 
@@ -85,8 +86,18 @@ Todo lo demás falta. Esto es el inventario completo, no una selección.
 
 ## 4. HAL — drivers de hardware
 
-- ❌ **Almacenamiento**: AHCI (SATA), luego NVMe
-- ❌ **Red**: driver Ethernet (RTL8139, emulable en QEMU) → ARP/IP/ICMP
+- ✅ **Almacenamiento — AHCI (detección)** *borrador sin verificar* —
+  controlador encontrado por PCI, ABAR mapeado, puertos implementados
+  y dispositivo en cada uno (SATA/ATAPI) vía PxSSTS/PxSIG. **Sin
+  comandos reales todavía** — IDENTIFY DEVICE y lectura/escritura de
+  sectores necesitan Command List + FIS + PRDT, pasada aparte
+- ❌ **Almacenamiento — NVMe**
+- ✅ **Red — RTL8139 (detección + MAC)** *borrador sin verificar* —
+  chip encontrado por PCI, despertado, soft reset, MAC de fábrica
+  leída. **Sin TX/RX todavía** — necesita buffer circular de recepción
+  y descriptores de transmisión con memoria DMA real (del allocador
+  físico, no estática), pasada aparte
+- ❌ **Red — resto del stack**: ARP/IP/ICMP
   → UDP/TCP → DHCP/DNS → sockets BSD (`socket`/`connect`/`bind`/...) →
   WiFi (mucho más difícil, firmware de vendor)
 - ❌ **USB**: xHCI → HID (teclado/ratón USB, no solo PS/2) → almacenamiento
