@@ -15,11 +15,15 @@ Todo lo demás falta. Esto es el inventario completo, no una selección.
 - ✅ Heap del kernel (bump allocator v1, sin free real)
 - ✅ Framebuffer + texto básico
 - ❌ **Heap real con free-list** (M2b, ya anotado)
-- ❌ **APIC local + I/O APIC** — el PIC legacy que tenemos no basta para
-  SMP ni para IRQ routing moderno; hace falta para todo lo que viene
-  después (timer preciso, multi-core, USB, red con interrupciones)
-- ❌ **Timer del sistema** — PIT y/o APIC timer calibrado, tick de
-  uptime real (ahora mismo no hay ninguna noción de tiempo transcurrido)
+- ✅ **APIC local** *borrador sin verificar* — habilitado, timer
+  periódico armado (`apic.rs`), primera activación real de
+  interrupciones (`sti`) en todo el kernel, vector 0x40 registrado en
+  la IDT. Requirió ampliar el identity-map de `boot.asm` de 1 a 4 GiB
+  (el Local APIC vive en ~0xFEE00000, fuera del primer GiB)
+- ❌ **I/O APIC** — solo tenemos Local APIC por ahora
+- ❌ **Timer del sistema calibrado** — el `initial_count` del timer
+  periódico es un valor arbitrario sin calibrar contra PIT/TSC; no
+  corresponde a una frecuencia real en Hz todavía
 - ❌ **Driver RTC** (reloj de pared — hora/fecha real, ya mencionado)
 - ❌ **Gestor de memoria virtual completo** — hoy solo hay identity-map
   fijo montado en boot.asm; falta una API real desde Rust para
