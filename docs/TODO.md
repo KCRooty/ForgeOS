@@ -57,6 +57,14 @@ Todo lo demás falta. Esto es el inventario completo, no una selección.
   Asmodeus14/Nyx es buen precedente
 - ❌ **Memoria compartida (SHM)** — necesaria más adelante para el
   compositor gráfico (ventanas cliente)
+- ❌ **Ember** (nombre propuesto) — sistema de inicialización, PID 1.
+  Primer proceso de userland arrancado por el kernel tras M4c; lanza el
+  resto de servicios/demonios en orden de dependencias. Modelo
+  **rc.d de FreeBSD** (scripts secuenciales simples, no systemd) — cada
+  demonio construido con el patrón **privsep** ya documentado en
+  `PHILOSOPHY.md` (proceso sin privilegios + supervisor mínimo). Sin
+  esto, el kernel arranca pero nada de userland (red, login, Anvil)
+  tiene forma de encenderse solo.
 
 ## 3. Filesystem (M5)
 
