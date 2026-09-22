@@ -76,8 +76,22 @@ Todo lo demás falta. Esto es el inventario completo, no una selección.
   sin preemption conectada (M4b, parte pendiente), no hay forma de
   recuperar el control tras saltar — por diseño no se ejecuta en el
   arranque automático, solo a demanda
-- ❌ **Syscalls reales** — con ring 3 real ya hecho, es lo siguiente:
-  `syscall`/`sysret` + tabla de syscalls + `caps::enforce` por llamada
+- ✅ **Syscalls reales — `syscall`/`sysret` (M4g)** *borrador sin
+  verificar — la pieza más delicada de toda la sesión, más piezas
+  móviles que AHCI* — `syscall.rs`: MSRs (EFER.SCE, STAR, LSTAR,
+  FMASK), entrada naked con cambio a pila de kernel propia (syscall NO
+  cambia de pila sola, a diferencia de una interrupción con TSS),
+  `SyscallFrame` con la convención ya documentada (RAX=número,
+  RDI/RSI/RDX/R10/R8/R9=args). Probado con un tercer ELF
+  (`TEST_ELF_SYSCALL`) que ejecuta `syscall` de verdad desde ring 3,
+  vía comando `synccalltest`. **Importante:** prueba el viaje completo
+  ring3→syscall→kernel→sysret→ring3, que es lo que hace la mayoría de
+  syscalls reales — un `exit()` que recupere el control de la consola
+  necesita integración con el scheduler (guardar/restaurar contexto
+  como `task.rs`), pieza aparte todavía no hecha
+- ❌ **`caps::enforce` conectado de verdad** — el dispatcher ya existe
+  (`syscall_dispatch`), falta llamar `caps::enforce` por cada syscall
+  antes de ejecutarla
 - ❌ **wait()/exit()** — recolección de procesos zombie
 - ❌ **Señales** (signals) — al menos SIGKILL/SIGTERM/SIGSEGV
 - ❌ **Dispatcher de syscalls real** — el punto donde `caps::enforce`

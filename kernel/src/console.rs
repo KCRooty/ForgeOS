@@ -79,8 +79,37 @@ fn dispatch(port: &mut SerialPort, line: &str) {
         "help" => {
             let _ = write!(
                 port,
-                "comandos: help, meminfo, caps, bp, panic, fb, pci, ahci, net, disktest, ls, cat, write, ring3test\r\n"
+                "comandos: help, meminfo, caps, bp, panic, fb, pci, ahci, net, disktest, ls, cat, write, ring3test, synccalltest\r\n"
             );
+        }
+        "synccalltest" => {
+            let _ = write!(port, "cargando ELF que ejecuta syscall(SYS_PING) desde ring 3...\r\n");
+            let _ = write!(port, "AVISO: sigue siendo viaje de ida al final (jmp $ tras la syscall)\r\n");
+            let _ = write!(port, "pero deberias ver el mensaje [syscall] SYS_PING en el log antes de eso.\r\n");
+
+            match elf::load(&elf::TEST_ELF_SYSCALL) {
+                Ok(loaded) => unsafe {
+                    let stack_phys = match pmm::alloc_frame() {
+                        Some(f) => f,
+                        None => {
+                            let _ = write!(port, "sin memoria para la pila de usuario\r\n");
+                            return;
+                        }
+                    };
+                    let user_stack_virt: u64 = 0x0000_0080_0000_0000; // 512 GiB, privado del proceso
+                    if let Err(e) = mmu::map_page_in(loaded.page_table, user_stack_virt, stack_phys, true, false) {
+                        let _ = write!(port, "fallo mapeando la pila de usuario: {}\r\n", e);
+                        return;
+                    }
+                    let user_stack_top = user_stack_virt + 4096;
+
+                    mmu::switch_address_space(loaded.page_table);
+                    ring3::enter_ring3(loaded.entry_point, user_stack_top);
+                },
+                Err(e) => {
+                    let _ = write!(port, "carga del ELF falló: {}\r\n", e);
+                }
+            }
         }
         "ring3test" => {
             let _ = write!(port, "cargando ELF de prueba y saltando a ring 3...\r\n");
