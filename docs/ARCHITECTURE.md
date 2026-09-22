@@ -69,7 +69,10 @@ Categorías actuales (`CapMask`, `u32`, una por bit):
   avanzar un puntero)
 - **M2c** — primer dispatcher de syscalls real (aquí `caps::enforce` se
   vuelve operativo)
-- **M3** — framebuffer (tag de vídeo Multiboot2) + texto en pantalla
+- **M3** ✅ *borrador sin verificar* — tag de framebuffer pedido en
+  `boot.asm` (1024×768@32bpp), parser + patrón de prueba de 8 barras de
+  color (`framebuffer.rs`), comando `fb` en la consola para redibujar a
+  demanda
 - **M4** — scheduler + tabla de procesos con `Capabilities` por proceso;
   Object Manager
 - **M5** — VFS + initramfs

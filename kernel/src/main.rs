@@ -11,6 +11,7 @@ extern crate alloc;
 
 mod caps;
 mod console;
+mod framebuffer;
 mod gdt;
 mod heap;
 mod idt;
@@ -93,10 +94,15 @@ pub extern "C" fn kernel_main_upper(mb2_info_ptr: u64) -> ! {
         Err(_) => serial_println!("[caps] ampliar pledge -> denegado (correcto, es irreversible)"),
     }
 
+    // M3 — framebuffer + patrón de prueba visual. "Parche" funcional:
+    // demuestra que se escribe de verdad en pantalla, nada de estética.
+    unsafe { framebuffer::init(mb2_info_ptr) };
+    framebuffer::test_pattern();
+
     // TODO M2b: heap real con free-list (recuperar memoria de dealloc)
     // TODO M2c: syscalls reales — aquí `caps::enforce` pasa a llamarse
     //           por cada una
-    // TODO M3: framebuffer (Multiboot2 tag de vídeo) + texto en pantalla
+    // TODO M3b: texto en pantalla (fuente bitmap) — de momento solo color
     // TODO M4: scheduler + tabla de procesos; shell real ("Bellows")
     // TODO M6+: Anvil + terminal ("Crucible")
 
