@@ -5,6 +5,39 @@ Todo lo demás falta. Esto es el inventario completo, no una selección.
 
 ---
 
+## 0. Reconstrucción pendiente (importado desde el histórico de chat)
+
+Este repo se importó a partir de 37 snapshots de desarrollo pasados desde
+Claude web (ver `docs/MEGADOC.md` para el documento maestro completo). El
+propio megadoc (v1.2) documenta milestones posteriores al último snapshot
+que se pudo importar (`rtl8139-tx`) para los que no llegó a recuperarse el
+zip correspondiente. Quedan como próximo trabajo real en Claude Code, no
+como diseño sin probar:
+
+- ❌ **`process.rs`** — PCB real, tabla global de procesos, `alloc_pid()`,
+  `mark_zombie()` (milestone `fork-execve`)
+- ❌ **`SYS_FORK`/`SYS_EXECVE`/`SYS_EXIT`/`SYS_GETPID` reales** —
+  `clone_address_space`, `enter_ring3_with_rax` para el hijo de fork()
+  (milestone `fork-execve`)
+- ❌ **`partinfo.rs`** — escáner de particiones GPT/MBR, detección de FS
+  (ext2/3/4, btrfs, NTFS, FAT32) (milestone `partinfo-ext4-preempt`)
+- ❌ **`preempt.rs`** — preemption real vía timer APIC, separado de M4b
+  (milestone `partinfo-ext4-preempt`)
+- ❌ **`ext2.rs`** — filesystem ext2/ext4 real de solo lectura, árbol de
+  extents (milestone `ext2`)
+- ❌ **RTL8139 RX real** — bucle de extracción de paquetes del anillo,
+  wraparound de `CAPR` (milestone `m5-netrx`, verificado en QEMU con ARP
+  real contra slirp 10.0.2.2)
+- ❌ **`pci.rs`: `write_config`/`write_config_u16`** — necesario para
+  activar PCI Bus Master Enable antes del RX real (milestone `m5-netrx`)
+- ❌ **`net.rs`** — tabla ARP, `inet_csum` (RFC 1071), `build_ping`,
+  `parse_icmp_echo_reply` — ping ICMP real verificado en QEMU contra
+  10.0.2.2 (milestone `m6-ping`)
+- ❌ **AHCI/RTL8139 "verified-drivers"** — pasada de doble verificación
+  de ambos drivers contra fuentes oficiales, más allá de lo ya integrado
+
+---
+
 ## 1. Núcleo del kernel (Ring 0, bajo nivel)
 
 - ✅ Boot Multiboot2 → Long Mode
