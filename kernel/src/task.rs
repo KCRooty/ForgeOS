@@ -14,7 +14,7 @@
 //! a mirar — más incluso que la ABI de idt.rs.
 
 use alloc::boxed::Box;
-use core::arch::asm;
+use core::arch::naked_asm;
 
 pub const STACK_SIZE: usize = 16 * 1024; // 16 KiB por tarea
 
@@ -128,9 +128,9 @@ impl Task {
 /// `switch_to` la última vez que esa tarea cedió el turno — técnica
 /// estándar de corutinas/hilos cooperativos (misma idea que usan
 /// ucontext o boost::context).
-#[naked]
+#[unsafe(naked)]
 pub unsafe extern "C" fn switch_to(old: *mut Context, new: *const Context) {
-    asm!(
+    naked_asm!(
         "mov [rdi + 0],  rbx",
         "mov [rdi + 8],  rbp",
         "mov [rdi + 16], r12",
@@ -146,6 +146,5 @@ pub unsafe extern "C" fn switch_to(old: *mut Context, new: *const Context) {
         "mov r15, [rsi + 40]",
         "mov rsp, [rsi + 48]",
         "ret",
-        options(noreturn)
     );
 }
