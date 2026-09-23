@@ -49,6 +49,36 @@ esta sesión):
   `elf.rs` sobre por qué cualquier dirección por debajo de 512 GiB
   (`1<<39`) es, en la práctica, compartida entre todos los procesos.
 
+**Actualización — `wait()` real + liberación de memoria (Claude Code,
+verificado en QEMU):** ver sección 2 más abajo. Tres bugs más
+encontrados al implementarlo, todos preexistentes:
+
+- **Pila de kernel única compartida entre TODOS los procesos**
+  (`KERNEL_SYSCALL_STACK`, un solo global). Inofensivo mientras una
+  syscall fuera un viaje de ida (`exit()`, nunca se reanuda), pero
+  corrompía cualquier syscall que SÍ esperara reanudarse más tarde: si
+  el padre cedía el turno dentro de `wait()` y el hijo hacía sus
+  propias syscalls mientras tanto, la pila compartida quedaba pisada
+  justo donde el padre tenía su contexto guardado. Arreglado con una
+  pila de kernel PROPIA por tarea (`Task::kernel_stack_top`, activada
+  por `scheduler::yield_now()` igual que CR3).
+- **`process::current_pid()` no se restauraba al cambiar de tarea** —
+  solo se fijaba una vez, en el trampolín de cada proceso. Un hijo
+  terminando mientras el padre seguía pausado dejaba `current_pid()`
+  pegado al PID del hijo (ya reapeado) cuando el padre se reanudaba.
+  Arreglado asociando el PID a la propia `Task` (`Task::pid`) y
+  restaurándolo en `yield_now()`.
+- **La pila de kernel por-tarea nueva no estaba alineada a 16 bytes** —
+  usada tal cual como RSP en `syscall_entry` (`mov rsp, [stack_top]`),
+  pero `Vec<u8>` pide alineación 1 al allocator; sin forzar `& !0xF`,
+  el `call {handler}` de después rompía la convención SysV justo en la
+  entrada de la función llamada. Se manifestaba como corrupción de
+  memoria aleatoria (PIDs y punteros con basura, paniques de "index out
+  of range") en cuanto se encadenaban varios procesos en la misma
+  sesión (`forktest` seguido de `exec`, por ejemplo) — la pila estática
+  compartida original tampoco tenía esta garantía (ahora con
+  `#[repr(align(16))]` explícito, por si acaso).
+
 ---
 
 ## 0. Reconstrucción pendiente (importado desde el histórico de chat)
@@ -190,9 +220,16 @@ zip correspondiente. `process.rs` y fork/execve/exit/getpid (milestone
   padre, solo `rip`/`rsp`/`rflags`/`rax` (ver aviso largo en
   `ring3::enter_ring3_with_rax`) — vale para el payload de prueba, no
   para un `fork()` de propósito general todavía.
-- ❌ **`wait()`** — recolección de zombies por el padre (`exit()` ya
-  deja el proceso en `Zombie(exit_code)`, pero nadie lo recoge ni libera
-  su PML4/frames — fuga de memoria de facto en sesiones largas)
+- ✅ **`wait()` real (`SYS_WAIT`=61)** *verificado en QEMU* —
+  bloqueante de verdad (cede el turno en bucle hasta que el hijo sea
+  zombie, mismo patrón cooperativo que `exit()`), recoge el PID y
+  código de salida (`arg0` = puntero de usuario opcional a `i32`), y
+  **libera de verdad la memoria del hijo**: `mmu::free_address_space`
+  (nuevo — reverso exacto de `clone_address_space`, recorre y libera
+  P4[1..=255] entero: tablas intermedias + páginas de datos + el
+  propio PML4, nunca P4[0]). Comando de consola `waittest`
+  (`elf::TEST_ELF_FORK_WAIT`) — confirmado con `ps`: el hijo desaparece
+  de la tabla tras `wait()`, ya no queda zombie para siempre.
 - ❌ **Señales** (signals) — al menos SIGKILL/SIGTERM/SIGSEGV
 - ✅ **Dispatcher de syscalls real** *verificado en QEMU* — ya no es
   demo aislada: `caps::enforce_current` protege `SYS_PING`, `CAP_EXEC`
