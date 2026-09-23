@@ -33,8 +33,11 @@ pub fn init() {
 /// Añade una tarea nueva a la cola, con espacio de direcciones propio.
 /// `page_table` = 0 para un hilo de kernel normal (comparte el espacio
 /// activo, como `spawn`); distinto de 0 para un proceso con su propio
-/// PML4 (creado con `mmu::create_address_space`).
-pub fn spawn_with_space(entry: fn() -> !, page_table: u64) -> u64 {
+/// PML4 (creado con `mmu::create_address_space`). `pid` = 0 para un
+/// hilo de kernel sin identidad de proceso; el PID real (`process.rs`)
+/// para una tarea que representa un proceso — el scheduler lo restaura
+/// en `process::CURRENT_PID` en cada cambio de tarea.
+pub fn spawn_with_space(entry: fn() -> !, page_table: u64, pid: u64) -> u64 {
     unsafe {
         let sched = (*SCHEDULER.0.get())
             .as_mut()
@@ -42,6 +45,7 @@ pub fn spawn_with_space(entry: fn() -> !, page_table: u64) -> u64 {
         let id = sched.tasks.len() as u64;
         let mut task = Task::new(id, entry);
         task.page_table = page_table;
+        task.pid = pid;
         sched.tasks.push(task);
         id
     }
@@ -50,7 +54,7 @@ pub fn spawn_with_space(entry: fn() -> !, page_table: u64) -> u64 {
 /// Añade una tarea nueva a la cola. No empieza a correr hasta que le
 /// toque turno por `yield_now()`.
 pub fn spawn(entry: fn() -> !) -> u64 {
-    spawn_with_space(entry, 0)
+    spawn_with_space(entry, 0, 0)
 }
 
 /// Marca la tarea actualmente en ejecución como `Finished` — nunca más
@@ -108,6 +112,19 @@ pub fn yield_now() {
         if next_pt != 0 && next_pt != crate::mmu::current_address_space() {
             crate::mmu::switch_address_space(next_pt);
         }
+
+        // Misma idea que el cambio de CR3, pero para la pila que usará
+        // la PRÓXIMA syscall de esta tarea — ver el porqué en
+        // `task.rs::Task::kernel_stack_top`. `0` = hilo de kernel puro,
+        // nunca ejecuta `syscall`, no hay nada que activar.
+        let next_kstack = sched.tasks[next_idx].kernel_stack_top;
+        if next_kstack != 0 {
+            crate::syscall::set_syscall_stack_top(next_kstack);
+        }
+
+        // Igual que CR3 y la pila de syscalls: `current_pid()` debe
+        // reflejar quién corre AHORA, no quién arrancó primero.
+        crate::process::set_current_pid(sched.tasks[next_idx].pid);
 
         let old_ctx: *mut Context = &mut sched.tasks[old_idx].context;
         let new_ctx: *const Context = &sched.tasks[next_idx].context;

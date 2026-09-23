@@ -14,11 +14,12 @@ use core::sync::atomic::{AtomicU64, Ordering};
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum ProcessState {
     Running,
-    /// Terminado, esperando a que su padre recoja el código de salida
-    /// con `wait()` — no hay `wait()` todavía (ver TODO.md), así que
-    /// por ahora un zombie se queda zombie para siempre. Suficiente
-    /// para demostrar que `exit()` funciona sin necesitar la otra
-    /// mitad todavía.
+    /// Terminado, esperando a que su padre lo recoja con `wait()`
+    /// (`SYS_WAIT`, `syscall.rs::sys_wait`) — `reap_zombie()` lo saca
+    /// de la tabla y libera de verdad su espacio de direcciones
+    /// (`mmu::free_address_space`). Si nadie lo recoge, se queda
+    /// zombie para siempre (sin `Ember`/PID 1 todavía, nadie hace de
+    /// padre huérfano-adoptante — ver TODO.md).
     Zombie(i32),
 }
 
@@ -104,6 +105,34 @@ pub fn list() -> Vec<Pcb> {
     unsafe { (*TABLE.0.get()).clone() }
 }
 
+/// `true` si `parent_pid` tiene al menos un hijo registrado (zombie o
+/// no) — para que `wait()` pueda distinguir "no hay nada que esperar"
+/// (ECHILD, devolver ya) de "hay hijos pero ninguno ha terminado
+/// todavía" (esperar de verdad, cediendo el turno).
+pub fn has_children(parent_pid: u64) -> bool {
+    unsafe { (*TABLE.0.get()).iter().any(|p| p.parent_pid == parent_pid) }
+}
+
+/// Busca el primer hijo zombie de `parent_pid`, lo saca de la tabla, y
+/// libera de verdad su espacio de direcciones (PML4 + tablas
+/// intermedias + páginas de datos — `mmu::free_address_space`, nunca
+/// se llamaba hasta ahora). `None` si no hay ningún hijo zombie
+/// todavía (puede que sí haya hijos vivos — ver `has_children`).
+pub fn reap_zombie(parent_pid: u64) -> Option<(u64, i32)> {
+    unsafe {
+        let table = &mut *TABLE.0.get();
+        let idx = table
+            .iter()
+            .position(|p| p.parent_pid == parent_pid && matches!(p.state, ProcessState::Zombie(_)))?;
+        let pcb = table.remove(idx);
+        let ProcessState::Zombie(code) = pcb.state else {
+            unreachable!("filtrado por posición arriba")
+        };
+        crate::mmu::free_address_space(pcb.page_table);
+        Some((pcb.pid, code))
+    }
+}
+
 // --- lanzamiento del primer proceso de una demo (no un fork) ---
 //
 // Mismo patrón de "slot de handoff único" que `syscall::sys_fork` usa
@@ -111,16 +140,16 @@ pub fn list() -> Vec<Pcb> {
 // sin argumentos, así que la única forma de pasarle datos a la tarea
 // nueva es dejarlos en globales que ella lea nada más arrancar.
 
-static mut LAUNCH_PID: u64 = 0;
 static mut LAUNCH_ENTRY: u64 = 0;
 static mut LAUNCH_STACK: u64 = 0;
 
 fn launch_trampoline() -> ! {
     unsafe {
-        let pid = LAUNCH_PID;
         let entry = LAUNCH_ENTRY;
         let stack = LAUNCH_STACK;
-        set_current_pid(pid);
+        // `current_pid()` ya lo dejó puesto el scheduler (`yield_now`,
+        // con `Task::pid`) antes de saltar aquí — no hace falta
+        // fijarlo a mano.
         crate::ring3::enter_ring3(entry, stack);
     }
 }
@@ -133,9 +162,8 @@ fn launch_trampoline() -> ! {
 pub unsafe fn spawn_process(entry_point: u64, user_stack_top: u64, page_table: u64, parent_pid: u64) -> u64 {
     let pid = alloc_pid();
     register(pid, parent_pid, page_table);
-    LAUNCH_PID = pid;
     LAUNCH_ENTRY = entry_point;
     LAUNCH_STACK = user_stack_top;
-    crate::scheduler::spawn_with_space(launch_trampoline, page_table);
+    crate::scheduler::spawn_with_space(launch_trampoline, page_table, pid);
     pid
 }
