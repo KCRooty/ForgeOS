@@ -36,8 +36,27 @@ const IA32_FMASK: u32 = 0xC000_0084;
 const STAR_USER_BASE: u16 = 0x10;
 
 const KERNEL_SYSCALL_STACK_SIZE: usize = 16 * 1024;
-static mut KERNEL_SYSCALL_STACK: [u8; KERNEL_SYSCALL_STACK_SIZE] = [0; KERNEL_SYSCALL_STACK_SIZE];
+// `align(16)` explícito — usado directamente como RSP en `syscall_entry`
+// (ver el mismo razonamiento en `task.rs::Task::new` para las pilas de
+// kernel por-tarea); un `[u8; N]` estático sin esto solo garantiza
+// alineación a 1 byte.
+#[repr(align(16))]
+struct KernelSyscallStack([u8; KERNEL_SYSCALL_STACK_SIZE]);
+static mut KERNEL_SYSCALL_STACK: KernelSyscallStack = KernelSyscallStack([0; KERNEL_SYSCALL_STACK_SIZE]);
 static mut SYSCALL_STACK_TOP: u64 = 0;
+
+/// Cambia la pila que usará la PRÓXIMA entrada por `syscall` — llamado
+/// por `scheduler::yield_now()` al entrarle el turno a una tarea, con
+/// su `Task::kernel_stack_top` (0 = tarea sin pila de syscalls propia,
+/// no se toca — un hilo de kernel puro nunca ejecuta `syscall`). Ver
+/// el comentario largo en `task.rs::Task::kernel_stack_top` sobre por
+/// qué hace falta: sin esto, TODAS las tareas comparten
+/// `KERNEL_SYSCALL_STACK`, y una syscall que ceda el turno esperando
+/// reanudarse más tarde (`wait()`) se corrompe en cuanto otra tarea
+/// hace su propia syscall mientras tanto.
+pub fn set_syscall_stack_top(top: u64) {
+    unsafe { SYSCALL_STACK_TOP = top };
+}
 static mut USER_RSP_SCRATCH: u64 = 0;
 
 pub const SYS_PING: u64 = 1;
@@ -47,6 +66,7 @@ pub const SYS_GETPID: u64 = 39;
 pub const SYS_FORK: u64 = 57;
 pub const SYS_EXECVE: u64 = 59;
 pub const SYS_EXIT: u64 = 60;
+pub const SYS_WAIT: u64 = 61; // == wait4 en Linux x86_64; no hay "wait" clásica en esa ABI
 
 /// Argumentos de una syscall, en el orden `syscall/sysret` de Linux
 /// x86_64 (RAX=número, RDI/RSI/RDX/R10/R8/R9=args) — ya documentado en
@@ -96,7 +116,7 @@ unsafe fn write_msr(msr: u32, value: u64) {
 
 pub fn init() {
     unsafe {
-        SYSCALL_STACK_TOP = KERNEL_SYSCALL_STACK.as_ptr() as u64 + KERNEL_SYSCALL_STACK_SIZE as u64;
+        SYSCALL_STACK_TOP = KERNEL_SYSCALL_STACK.0.as_ptr() as u64 + KERNEL_SYSCALL_STACK_SIZE as u64;
 
         let efer = read_msr(IA32_EFER);
         write_msr(IA32_EFER, efer | 1); // bit0 = SCE, syscall enable
@@ -207,6 +227,7 @@ extern "C" fn syscall_dispatch(frame: *mut SyscallFrame) -> u64 {
             sys_execve(frame)
         }
         SYS_EXIT => sys_exit(frame),
+        SYS_WAIT => sys_wait(frame),
         other => {
             serial_println!("[syscall] número desconocido: {}", other);
             u64::MAX
@@ -252,7 +273,7 @@ fn sys_fork(frame: &SyscallFrame) -> u64 {
         FORK_CHILD_RIP = frame.user_rip;
         FORK_CHILD_RSP = USER_RSP_SCRATCH;
     }
-    scheduler::spawn_with_space(fork_child_trampoline, child_p4);
+    scheduler::spawn_with_space(fork_child_trampoline, child_p4, child_pid);
 
     serial_println!(
         "[syscall] fork: PID {} -> hijo PID {} (PML4 nuevo @ 0x{:x})",
@@ -273,17 +294,18 @@ fn sys_fork(frame: &SyscallFrame) -> u64 {
 /// pero con `rax=0` — la convención de `fork()` para el hijo.
 fn fork_child_trampoline() -> ! {
     unsafe {
-        let pid = FORK_CHILD_PID;
+        // `current_pid()` ya lo dejó puesto el scheduler (`yield_now`,
+        // con `Task::pid`) antes de saltar aquí.
         let rip = FORK_CHILD_RIP;
         let rsp = FORK_CHILD_RSP;
-        process::set_current_pid(pid);
         ring3::enter_ring3_with_rax(rip, rsp, 0);
     }
 }
 
 /// `exit()` — marca el proceso actual como zombie y cede el turno para
-/// siempre. No hay `wait()` todavía (ver TODO.md), así que el zombie
-/// se queda zombie — suficiente para probar que `exit()` termina el
+/// siempre. Su padre lo recoge con `wait()` (`sys_wait`, más abajo),
+/// que también libera de verdad la memoria del hijo — suficiente para
+/// probar que `exit()` termina el
 /// proceso de verdad y no vuelve a ejecutarse.
 fn sys_exit(frame: &SyscallFrame) -> ! {
     let pid = process::current_pid();
@@ -302,6 +324,41 @@ fn sys_exit(frame: &SyscallFrame) -> ! {
     // dejaba la consola sin responder a ninguna tecla más.
     unsafe { core::arch::asm!("sti") };
     loop {
+        scheduler::yield_now();
+    }
+}
+
+/// `wait()` — espera a que termine un hijo y recoge su código de
+/// salida. `arg0` = puntero de usuario a un `i32` donde escribir el
+/// código de salida (0/NULL para ignorarlo, como `wait(NULL)` en
+/// POSIX). Devuelve el PID del hijo recogido, o `u64::MAX` si el
+/// proceso llamante no tiene NINGÚN hijo (vivo o muerto) — equivalente
+/// a ECHILD, no tiene sentido esperar.
+///
+/// Bloqueante de verdad, sin ninguna primitiva de sincronización
+/// nueva: si hay hijos pero ninguno es zombie todavía, cede el turno
+/// en bucle (`scheduler::yield_now()`) — mismo patrón cooperativo que
+/// ya usa `exit()`. El hijo es una tarea más del scheduler, así que el
+/// round-robin acaba llegando a él, dejándolo correr hasta su propio
+/// `exit()` — la vuelta siguiente de este bucle lo encuentra zombie.
+fn sys_wait(frame: &SyscallFrame) -> u64 {
+    let caller = process::current_pid();
+    if !process::has_children(caller) {
+        return u64::MAX;
+    }
+    loop {
+        if let Some((child_pid, exit_code)) = process::reap_zombie(caller) {
+            if frame.arg0 != 0 {
+                unsafe { *(frame.arg0 as *mut i32) = exit_code };
+            }
+            serial_println!(
+                "[syscall] wait: PID {} recogió al hijo PID {} (código {}) — memoria liberada",
+                caller,
+                child_pid,
+                exit_code
+            );
+            return child_pid;
+        }
         scheduler::yield_now();
     }
 }

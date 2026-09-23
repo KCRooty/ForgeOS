@@ -65,6 +65,10 @@ unsafe impl GlobalAlloc for BumpAllocator {
 #[global_allocator]
 static ALLOCATOR: BumpAllocator = BumpAllocator::new();
 
+pub fn used_bytes() -> usize {
+    unsafe { *ALLOCATOR.next.get() }
+}
+
 #[alloc_error_handler]
 fn alloc_error(layout: Layout) -> ! {
     crate::serial_println!(
