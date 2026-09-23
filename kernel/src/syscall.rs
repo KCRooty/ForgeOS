@@ -416,7 +416,15 @@ fn sys_execve(frame: &SyscallFrame) -> u64 {
             return u64::MAX;
         }
     };
-    let user_stack_virt: u64 = 0x0000_0070_0000_0000; // 448 GiB, privado del nuevo espacio
+    // 768 GiB, índice P4 = 1 — genuinamente privado del nuevo espacio.
+    // Antes vivía en 448 GiB (P4 = 0, POR DEBAJO del límite de 512 GiB
+    // documentado en elf.rs): parecía funcionar porque hasta ahora
+    // ningún binario había llamado a `execve()` dos veces en el mismo
+    // arranque. Lo encontró `ember` (m7-ember): la primera llamada dejó
+    // la página mapeada para siempre en el P4[0] COMPARTIDO por todo el
+    // kernel (`free_address_space` nunca toca P4[0], a propósito), y la
+    // segunda llamada chocaba contra esa misma dirección ya ocupada.
+    let user_stack_virt: u64 = 0x0000_00C0_0000_0000;
     if let Err(e) = unsafe { mmu::map_page_in(loaded.page_table, user_stack_virt, stack_phys, true, false) } {
         serial_println!("[syscall] execve: fallo mapeando la pila de usuario: {}", e);
         return u64::MAX;

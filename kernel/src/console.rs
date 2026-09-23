@@ -79,7 +79,7 @@ fn dispatch(port: &mut SerialPort, line: &str) {
         "help" => {
             let _ = write!(
                 port,
-                "comandos: help, meminfo, caps, bp, panic, fb, pci, ahci, net, ping, disktest, ls, cat, write, ring3test, synccalltest, synccalldeny, forktest, waittest, exec, ps\r\n"
+                "comandos: help, meminfo, caps, bp, panic, fb, pci, ahci, net, ping, disktest, ls, cat, write, ring3test, synccalltest, synccalldeny, forktest, waittest, exec, ember, ps\r\n"
             );
         }
         "synccalltest" => {
@@ -195,6 +195,7 @@ fn dispatch(port: &mut SerialPort, line: &str) {
                 let _ = write!(port, "de vuelta en la consola.\r\n");
             }
         }
+        "ember" => run_ember(port),
         "ps" => {
             let _ = write!(port, "PID  PPID  ESTADO\r\n");
             for p in process::list() {
@@ -458,6 +459,40 @@ fn run_ping(port: &mut SerialPort) {
 
     if !got_reply {
         let _ = write!(port, "timeout esperando ICMP echo reply\r\n");
+    }
+}
+
+/// Primera prueba real de Ember (PID 1, modelo rc.d): registra dos
+/// "servicios" en el VFS (reutilizando `TEST_ELF_PING_EXIT` — un
+/// binario que ya sabemos que arranca y termina limpio, aquí hace de
+/// placeholder de un servicio real) y arranca `TEST_ELF_EMBER`, que los
+/// lanza en orden, esperando a que cada uno termine del todo antes del
+/// siguiente.
+fn run_ember(port: &mut SerialPort) {
+    let _ = write!(port, "registrando servicios en el VFS: ember-svc0, ember-svc1...\r\n");
+    vfs::write("ember-svc0", &elf::TEST_ELF_PING_EXIT);
+    vfs::write("ember-svc1", &elf::TEST_ELF_PING_EXIT);
+
+    let _ = write!(port, "arrancando Ember (PID 1) como proceso real...\r\n");
+    caps::set_current({
+        let mut c = caps::Capabilities::unrestricted();
+        let _ = c.pledge(caps::CAP_STDIO | caps::CAP_EXEC);
+        c
+    });
+    if let Some(pid) = launch_elf(port, &elf::TEST_ELF_EMBER, 0) {
+        let _ = write!(port, "PID {} (Ember) arrancado — cediendo turno...\r\n", pid);
+        // Dos rondas secuenciales de fork+execve+wait encadenadas dentro
+        // del mismo proceso — mismo patrón que `waittest` (una ronda,
+        // 2 yields bastaron), aquí con margen extra por ser dos rondas.
+        for _ in 0..4 {
+            scheduler::yield_now();
+        }
+        let _ = write!(
+            port,
+            "de vuelta en la consola — revisa 'ps': los dos servicios ya no deberían aparecer \
+             (Ember los reapeó con wait(), memoria liberada de verdad); Ember mismo sí queda \
+             como zombie(code=0) — nadie lo espera, se lanzó directo desde la consola (PPID 0).\r\n"
+        );
     }
 }
 
