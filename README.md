@@ -1,4 +1,4 @@
-# Forge OS (nombre provisional)
+# Forge OS
 
 Kernel monolítico x86_64 en Rust, bare-metal, con filosofía híbrida:
 - **Linux**: ABI de syscalls numeradas x86_64, ecosistema de drivers como referencia
@@ -12,7 +12,7 @@ Ver [docs/PHILOSOPHY.md](docs/PHILOSOPHY.md) (diseño técnico) y
 [docs/PRODUCT.md](docs/PRODUCT.md) (a quién sirve y por qué) para el
 razonamiento completo detrás de cada decisión.
 
-## Estado: RTL8139 TX real (trama enviada + TxStatOK confirmado), RX preparado, sin verificar en QEMU (en construcción)
+## Estado: red funcional de extremo a extremo — RTL8139 TX/RX real, ARP + ICMP echo (`ping`) verificados en QEMU contra el gateway de slirp
 
 ## Referencias de arquitectura estudiadas
 - Asmodeus14/Nyx (Rust, QCLang, motor 3D Gen9.5 hand-rolled)
@@ -24,13 +24,24 @@ razonamiento completo detrás de cada decisión.
 ## Build (CachyOS / Arch)
 ```bash
 yay -S rustup nasm qemu-full grub xorriso lld
-rustup toolchain install nightly
-rustup component add rust-src llvm-tools-preview --toolchain nightly
-rustup override set nightly
-cargo build --target targets/x86_64-forge.json -Zbuild-std=core,alloc,compiler_builtins -Zbuild-std-features=compiler-builtins-mem
+rustup toolchain install nightly-2026-07-01
+rustup component add rust-src --toolchain nightly-2026-07-01
+./tools/build.sh
 ```
+
+`kernel/rust-toolchain.toml` fija el nightly exacto (el esquema del
+target-spec JSON cambia entre nightlies, así que no vale cualquiera) —
+`tools/build.sh` ya hace `cd kernel` antes de invocar `cargo build`,
+que es donde rustup detecta y aplica ese pin automáticamente.
 
 ## Run en QEMU
 ```bash
-./tools/run-qemu.sh
+./tools/run-qemu.sh              # gráfico, interactivo
+./tools/run-qemu.sh --headless   # sin display, log a boot.log
 ```
+
+Ambos modos arrancan con `-nic user,model=rtl8139` — necesario para que
+QEMU exponga de verdad una tarjeta RTL8139 por PCI (el modelo por
+defecto sin esta flag es un e1000, que el driver de `rtl8139.rs` ni
+detecta). Desde la consola de depuración, `ping` hace un ARP + ICMP
+echo completo contra el gateway de slirp (10.0.2.2).

@@ -79,6 +79,40 @@ encontrados al implementarlo, todos preexistentes:
   compartida original tampoco tenía esta garantía (ahora con
   `#[repr(align(16))]` explícito, por si acaso).
 
+**Actualización — red funcional de extremo a extremo (Claude Code,
+verificado en QEMU):** milestones `m5-netrx` y `m6-ping` reconstruidos
+desde cero (mismo caso que `fork-execve`: los zips originales no
+llegaron a recuperarse) y verificados con el comando de consola `ping`,
+que hace un ARP request + ICMP echo request reales contra el gateway de
+slirp de QEMU (10.0.2.2) y confirma la respuesta de vuelta, dos veces
+seguidas en la misma sesión sin fallos.
+
+- `pci.rs`: `write_config`/`write_config_u16`/`enable_bus_master` — sin
+  esto el chip nunca inicia DMA por su cuenta, aunque los descriptores
+  TX/RX estén bien configurados (Bus Master Enable, bit 2 del registro
+  Command).
+- `rtl8139.rs`: `poll_rx()` — extracción real de paquetes del anillo de
+  recepción: cabecera de 4 bytes (status + longitud), copia del
+  payload descontando la FCS, avance de `rx_cur` alineado a dword con
+  wraparound en `RX_LOGICAL_SIZE`, y el ajuste de `CAPR = rx_cur - 16`
+  que exige el hardware (mismo offset que usa Linux, no es libre
+  elección nuestra).
+- `net.rs` (nuevo): `inet_csum` (RFC 1071), tabla ARP mínima (array
+  estático de 8 entradas), `build_arp_request`/`parse_arp_reply`,
+  `build_ping`/`parse_icmp_echo_reply`.
+- Comando `ping` en la consola: ARP request → espera bloqueante
+  acotada (sondeo de `poll_rx`, sin preemption real todavía) → ICMP
+  echo request → espera acotada de la respuesta → reporta round-trip.
+
+**Descubrimiento en el camino, no un bug de nuestro código:** el modelo
+de NIC que QEMU expone por defecto sin flags de red explícitas es un
+`e1000`, no un `rtl8139` — en este host, sin `-nic user,model=rtl8139`,
+`rtl8139::find_controller()` no encontraba nada (comportamiento
+correcto: sencillamente no había ningún RTL8139 en el bus). Corregido
+en `tools/run-qemu.sh`, que ahora siempre pasa esa flag explícita en
+vez de confiar en el modelo por defecto de la instalación de QEMU de
+turno.
+
 ---
 
 ## 0. Reconstrucción pendiente (importado desde el histórico de chat)
@@ -96,14 +130,15 @@ zip correspondiente. `process.rs` y fork/execve/exit/getpid (milestone
   (milestone `partinfo-ext4-preempt`)
 - ❌ **`ext2.rs`** — filesystem ext2/ext4 real de solo lectura, árbol de
   extents (milestone `ext2`)
-- ❌ **RTL8139 RX real** — bucle de extracción de paquetes del anillo,
-  wraparound de `CAPR` (milestone `m5-netrx`, verificado en QEMU con ARP
-  real contra slirp 10.0.2.2)
-- ❌ **`pci.rs`: `write_config`/`write_config_u16`** — necesario para
-  activar PCI Bus Master Enable antes del RX real (milestone `m5-netrx`)
-- ❌ **`net.rs`** — tabla ARP, `inet_csum` (RFC 1071), `build_ping`,
+- ✅ **RTL8139 RX real** — bucle de extracción de paquetes del anillo,
+  wraparound de `CAPR` (milestone `m5-netrx`) ya reconstruido y
+  verificado — ver arriba
+- ✅ **`pci.rs`: `write_config`/`write_config_u16`** — Bus Master Enable
+  (milestone `m5-netrx`) ya reconstruido y verificado — ver arriba
+- ✅ **`net.rs`** — tabla ARP, `inet_csum` (RFC 1071), `build_ping`,
   `parse_icmp_echo_reply` — ping ICMP real verificado en QEMU contra
-  10.0.2.2 (milestone `m6-ping`)
+  10.0.2.2 (milestone `m6-ping`) ya reconstruido y verificado — ver
+  arriba
 - ❌ **AHCI/RTL8139 "verified-drivers"** — pasada de doble verificación
   de ambos drivers contra fuentes oficiales, más allá de lo ya integrado
 
@@ -285,20 +320,25 @@ zip correspondiente. `process.rs` y fork/execve/exit/getpid (milestone
   actual:** un solo PRDT → máximo 8 sectores (4 KiB) por llamada;
   transferencias grandes necesitarán múltiples entradas PRDT
 - ❌ **Almacenamiento — NVMe**
-- ✅ **Red — RTL8139 (TX real, RX preparado)** *borrador sin verificar
-  — registros TxStatus/TxAddr/RxBuf/RxConfig/TxConfig verificados
-  contra Linux Y el Programmer's Guide oficial de Realtek (doble
-  fuente)* — `init_full()`: reset, 3 frames contiguos para el anillo
-  RX (`pmm::alloc_contiguous`, nueva capacidad), 4 buffers TX,
-  RX+TX habilitados en el orden exigido. **`send()` completo y
-  probado** con una trama Ethernet de broadcast real, esperando
-  `TxStatOK` (bit15, confirmado contra la fuente oficial de Realtek).
-  **RX preparado pero sin bucle de extracción de paquetes todavía** —
-  leer el anillo (wraparound + ajuste de `CAPR`) es más delicado,
-  pasada aparte a propósito
-- ❌ **Red — resto del stack**: ARP/IP/ICMP
-  → UDP/TCP → DHCP/DNS → sockets BSD (`socket`/`connect`/`bind`/...) →
-  WiFi (mucho más difícil, firmware de vendor)
+- ✅ **Red — RTL8139 (TX + RX real)** *verificado en QEMU — registros
+  TxStatus/TxAddr/RxBuf/RxConfig/TxConfig verificados contra Linux Y el
+  Programmer's Guide oficial de Realtek (doble fuente)* — `init_full()`:
+  reset, 3 frames contiguos para el anillo RX (`pmm::alloc_contiguous`),
+  4 buffers TX, RX+TX habilitados en el orden exigido, Bus Master
+  Enable activado por PCI. **`send()`** probado con una trama Ethernet
+  de broadcast real, esperando `TxStatOK`. **`poll_rx()`** probado de
+  extremo a extremo: recibe de verdad la respuesta ARP y el ICMP echo
+  reply del comando `ping` (ver actualización arriba)
+- ✅ **Red — ARP + ICMP (`net.rs`)** *verificado en QEMU contra el
+  gateway de slirp (10.0.2.2)* — `inet_csum` (RFC 1071), tabla ARP
+  mínima, `build_arp_request`/`parse_arp_reply`,
+  `build_ping`/`parse_icmp_echo_reply`. Comando `ping` en la consola.
+  **Sin DHCP** — IP propia (10.0.2.15) fijada a mano, es el valor por
+  defecto de slirp
+- ❌ **Red — resto del stack**: IP/ICMP genérico (más allá del caso
+  echo) → UDP/TCP → DHCP/DNS → sockets BSD
+  (`socket`/`connect`/`bind`/...) → WiFi (mucho más difícil, firmware
+  de vendor)
 - ❌ **USB**: xHCI → HID (teclado/ratón USB, no solo PS/2) → almacenamiento
   masivo USB
 - ✅ **Input PS/2 (teclado)** *borrador sin verificar* — scancodes Set
