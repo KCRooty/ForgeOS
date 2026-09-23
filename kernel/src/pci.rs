@@ -42,6 +42,42 @@ pub fn read_config(bus: u8, device: u8, function: u8, offset: u8) -> u32 {
     }
 }
 
+/// Escribe un dword de 32 bits en el espacio de configuración de un
+/// dispositivo PCI. `offset` debe ir alineado a 4 bytes.
+pub fn write_config(bus: u8, device: u8, function: u8, offset: u8, value: u32) {
+    unsafe {
+        outl(CONFIG_ADDRESS, config_address(bus, device, function, offset));
+        outl(CONFIG_DATA, value);
+    }
+}
+
+/// Escribe 16 bits dentro del espacio de configuración — el mecanismo
+/// 0xCF8/0xCFC solo permite dwords completos, así que esto hace
+/// lectura-modificación-escritura del dword que contiene `offset`
+/// (que puede ir en la mitad alta o baja según sea par o impar en
+/// unidades de 2 bytes). Necesario para el registro Command (0x04):
+/// activar el bit Bus Master Enable ahí es justo lo que le falta al
+/// RTL8139 para que sus descriptores DMA (TX/RX) funcionen de verdad
+/// en vez de quedarse en "configurado pero mudo".
+pub fn write_config_u16(bus: u8, device: u8, function: u8, offset: u8, value: u16) {
+    let aligned = offset & 0xFC;
+    let dword = read_config(bus, device, function, aligned);
+    let shift = ((offset & 0x02) as u32) * 8; // 0 o 16
+    let mask = !(0xFFFFu32 << shift);
+    let new_dword = (dword & mask) | ((value as u32) << shift);
+    write_config(bus, device, function, aligned, new_dword);
+}
+
+/// Activa Bus Master Enable (bit 2 del registro Command, offset 0x04)
+/// para un dispositivo — sin esto, un dispositivo PCI no puede
+/// iniciar transferencias DMA por su cuenta aunque tenga los
+/// descriptores bien configurados. Preserva el resto de bits del
+/// registro Command (I/O Space Enable, Memory Space Enable, etc.).
+pub fn enable_bus_master(dev: &PciDevice) {
+    let command = read_config(dev.bus, dev.device, dev.function, 0x04) as u16;
+    write_config_u16(dev.bus, dev.device, dev.function, 0x04, command | 0x0004);
+}
+
 #[derive(Clone, Copy)]
 pub struct PciDevice {
     pub bus: u8,

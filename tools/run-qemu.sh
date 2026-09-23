@@ -21,6 +21,7 @@ if [ "${1:-}" == "--headless" ]; then
         -cdrom "$ISO" \
         -m 256M \
         -no-reboot -no-shutdown \
+        -nic user,model=rtl8139 \
         -serial file:"$ROOT/boot.log" \
         -display none
     echo "--- boot.log ---"
@@ -30,6 +31,7 @@ else
         -cdrom "$ISO" \
         -m 256M \
         -no-reboot \
+        -nic user,model=rtl8139 \
         -serial stdio \
         -vga std
 fi
