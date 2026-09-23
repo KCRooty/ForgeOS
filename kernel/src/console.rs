@@ -10,7 +10,7 @@
 //! Ver docs/SHELL.md para la relación con el shell y el terminal reales.
 
 use crate::serial::SerialPort;
-use crate::{ahci, caps, elf, ext2, framebuffer, mmu, net, pci, pmm, process, ring3, rtl8139, scheduler, vfs};
+use crate::{ahci, caps, elf, ext2, framebuffer, mmu, net, partinfo, pci, pmm, process, ring3, rtl8139, scheduler, vfs};
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::fmt::Write;
@@ -79,7 +79,7 @@ fn dispatch(port: &mut SerialPort, line: &str) {
         "help" => {
             let _ = write!(
                 port,
-                "comandos: help, meminfo, caps, bp, panic, fb, pci, ahci, net, ping, disktest, ls, cat, write, ext2ls, ext2cat, ring3test, synccalltest, synccalldeny, forktest, waittest, exec, ember, ps\r\n"
+                "comandos: help, meminfo, caps, bp, panic, fb, pci, ahci, net, ping, disktest, partinfo, ls, cat, write, ext2ls, ext2cat, ring3test, synccalltest, synccalldeny, forktest, waittest, exec, ember, ps\r\n"
             );
         }
         "synccalltest" => {
@@ -259,6 +259,7 @@ fn dispatch(port: &mut SerialPort, line: &str) {
                 }
             }
         }
+        "partinfo" => run_partinfo(port),
         "ext2ls" => {
             let path = parts.next().unwrap_or("/");
             run_ext2ls(port, path);
@@ -503,6 +504,41 @@ fn run_ember(port: &mut SerialPort) {
              (Ember los reapeó con wait(), memoria liberada de verdad); Ember mismo sí queda \
              como zombie(code=0) — nadie lo espera, se lanzó directo desde la consola (PPID 0).\r\n"
         );
+    }
+}
+
+fn run_partinfo(port: &mut SerialPort) {
+    let disk = match ahci::first_disk() {
+        Some(d) => d,
+        None => {
+            let _ = write!(port, "no se encontró ningún disco SATA listo\r\n");
+            return;
+        }
+    };
+    match partinfo::scan(&disk) {
+        Ok((kind, partitions)) => {
+            let kind_str = match kind {
+                partinfo::TableKind::Mbr => "MBR",
+                partinfo::TableKind::Gpt => "GPT",
+            };
+            let _ = write!(port, "tabla de particiones: {}\r\n", kind_str);
+            let _ = write!(port, "#   LBA inicio   sectores      tipo/nombre          filesystem\r\n");
+            for p in partitions {
+                let label = match (&p.mbr_type, &p.gpt_name) {
+                    (Some(t), _) => alloc::format!("0x{:02x}", t),
+                    (None, Some(name)) => name.clone(),
+                    _ => alloc::string::String::from("?"),
+                };
+                let _ = write!(
+                    port,
+                    "{:<3} {:<13} {:<13} {:<20} {}\r\n",
+                    p.index, p.start_lba, p.sector_count, label, p.filesystem
+                );
+            }
+        }
+        Err(e) => {
+            let _ = write!(port, "fallo al escanear la tabla de particiones: {}\r\n", e);
+        }
     }
 }
 

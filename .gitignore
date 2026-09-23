@@ -3,3 +3,5 @@
 /boot.log
 /iso/boot/forge-kernel.bin
 /disk.img
+/partinfo-mbr.img
+/partinfo-gpt.img

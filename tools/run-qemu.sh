@@ -33,6 +33,7 @@ if [ "${1:-}" == "--headless" ]; then
         -cdrom "$ISO" \
         -m 256M \
         -no-reboot -no-shutdown \
+        -boot order=d \
         -nic user,model=rtl8139 \
         "${DISK_ARGS[@]}" \
         -serial file:"$ROOT/boot.log" \
@@ -44,6 +45,7 @@ else
         -cdrom "$ISO" \
         -m 256M \
         -no-reboot \
+        -boot order=d \
         -nic user,model=rtl8139 \
         "${DISK_ARGS[@]}" \
         -serial stdio \
