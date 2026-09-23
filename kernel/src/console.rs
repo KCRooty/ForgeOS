@@ -10,7 +10,7 @@
 //! Ver docs/SHELL.md para la relación con el shell y el terminal reales.
 
 use crate::serial::SerialPort;
-use crate::{ahci, caps, elf, framebuffer, mmu, pci, pmm, process, ring3, rtl8139, scheduler, vfs};
+use crate::{ahci, caps, elf, framebuffer, mmu, net, pci, pmm, process, ring3, rtl8139, scheduler, vfs};
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::fmt::Write;
@@ -79,7 +79,7 @@ fn dispatch(port: &mut SerialPort, line: &str) {
         "help" => {
             let _ = write!(
                 port,
-                "comandos: help, meminfo, caps, bp, panic, fb, pci, ahci, net, disktest, ls, cat, write, ring3test, synccalltest, synccalldeny, forktest, waittest, exec, ps\r\n"
+                "comandos: help, meminfo, caps, bp, panic, fb, pci, ahci, net, ping, disktest, ls, cat, write, ring3test, synccalltest, synccalldeny, forktest, waittest, exec, ps\r\n"
             );
         }
         "synccalltest" => {
@@ -261,6 +261,7 @@ fn dispatch(port: &mut SerialPort, line: &str) {
         "pci" => pci::scan_and_print(),
         "ahci" => ahci::probe_and_print(),
         "net" => rtl8139::probe_and_print(),
+        "ping" => run_ping(port),
         "fb" => {
             if framebuffer::available() {
                 framebuffer::test_pattern();
@@ -346,6 +347,117 @@ fn launch_elf(port: &mut SerialPort, bytes: &[u8], parent_pid: u64) -> Option<u6
         let user_stack_top = user_stack_virt + 4096;
 
         Some(process::spawn_process(loaded.entry_point, user_stack_top, loaded.page_table, parent_pid))
+    }
+}
+
+/// ARP + ICMP echo de extremo a extremo contra la puerta de enlace de
+/// QEMU (`-net user`/slirp): 10.0.2.15 como IP propia, 10.0.2.2 como
+/// gateway — son los valores fijos que slirp asigna por defecto, sin
+/// DHCP real todavía en esta versión. Bucles de sondeo acotados (ver
+/// comentario en cada `while`): sin esto, una tarjeta sin respuesta
+/// (BAR mal leído, cable "desconectado" en la config de QEMU) colgaría
+/// la consola entera para siempre.
+fn run_ping(port: &mut SerialPort) {
+    let _ = write!(port, "inicializando RTL8139 para ping...\r\n");
+    let mut nic = match rtl8139::init_full() {
+        Some(n) => n,
+        None => {
+            let _ = write!(port, "no se pudo inicializar la tarjeta de red\r\n");
+            return;
+        }
+    };
+
+    let src_ip: net::Ipv4 = [10, 0, 2, 15];
+    let gateway_ip: net::Ipv4 = [10, 0, 2, 2];
+
+    let _ = write!(
+        port,
+        "ARP request para {}.{}.{}.{}...\r\n",
+        gateway_ip[0], gateway_ip[1], gateway_ip[2], gateway_ip[3]
+    );
+    let arp_frame = net::build_arp_request(nic.mac, src_ip, gateway_ip);
+    if let Err(e) = rtl8139::send(&mut nic, &arp_frame) {
+        let _ = write!(port, "fallo al enviar ARP request: {}\r\n", e);
+        return;
+    }
+
+    // Sondeo acotado: el chip no tiene forma de avisarnos por
+    // interrupción todavía (sin preemption real, M4b lo deja
+    // pendiente), así que comprobamos `poll_rx` en bucle. 5 millones de
+    // vueltas es un margen generoso frente al par de microsegundos que
+    // tarda slirp en contestar — mismo orden de magnitud que los demás
+    // timeouts de este driver (`send`, reset del chip).
+    let mut gateway_mac = None;
+    let mut attempts = 0u32;
+    while attempts < 5_000_000 {
+        if let Some(packet) = rtl8139::poll_rx(&mut nic) {
+            if let Some(reply) = net::parse_arp_reply(&packet) {
+                if reply.sender_ip == gateway_ip {
+                    gateway_mac = Some(reply.sender_mac);
+                    break;
+                }
+            }
+        }
+        attempts += 1;
+    }
+
+    let gateway_mac = match gateway_mac {
+        Some(mac) => mac,
+        None => {
+            let _ = write!(port, "timeout esperando ARP reply\r\n");
+            return;
+        }
+    };
+    net::arp_insert(gateway_ip, gateway_mac);
+    let _ = write!(
+        port,
+        "ARP reply: {}.{}.{}.{} esta en {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}\r\n",
+        gateway_ip[0],
+        gateway_ip[1],
+        gateway_ip[2],
+        gateway_ip[3],
+        gateway_mac[0],
+        gateway_mac[1],
+        gateway_mac[2],
+        gateway_mac[3],
+        gateway_mac[4],
+        gateway_mac[5]
+    );
+
+    let ident = 0x1234u16;
+    let seq = 1u16;
+    let _ = write!(
+        port,
+        "enviando ICMP echo request (id={}, seq={})...\r\n",
+        ident, seq
+    );
+    let ping_frame = net::build_ping(nic.mac, src_ip, gateway_mac, gateway_ip, ident, seq);
+    if let Err(e) = rtl8139::send(&mut nic, &ping_frame) {
+        let _ = write!(port, "fallo al enviar ping: {}\r\n", e);
+        return;
+    }
+
+    let mut got_reply = false;
+    let mut attempts = 0u32;
+    while attempts < 5_000_000 {
+        if let Some(packet) = rtl8139::poll_rx(&mut nic) {
+            if let Some(reply) = net::parse_icmp_echo_reply(&packet) {
+                if reply.id == ident && reply.seq == seq {
+                    let _ = write!(
+                        port,
+                        "pong de {}.{}.{}.{} (id={}, seq={}) — round-trip OK\r\n",
+                        reply.src_ip[0], reply.src_ip[1], reply.src_ip[2], reply.src_ip[3], reply.id, reply.seq
+                    );
+                    got_reply = true;
+                    break;
+                }
+            }
+        }
+        attempts += 1;
+    }
+
+    if !got_reply {
+        let _ = write!(port, "timeout esperando ICMP echo reply\r\n");
     }
 }
 

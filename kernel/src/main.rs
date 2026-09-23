@@ -22,6 +22,7 @@ mod idt;
 mod keyboard;
 mod mb2;
 mod mmu;
+mod net;
 mod pci;
 mod pic;
 mod pipe;
