@@ -113,6 +113,45 @@ en `tools/run-qemu.sh`, que ahora siempre pasa esa flag explícita en
 vez de confiar en el modelo por defecto de la instalación de QEMU de
 turno.
 
+**Actualización — Ember, primer boceto de PID 1 (Claude Code, verificado
+en QEMU):** modelo rc.d de FreeBSD (secuencial, cada servicio termina
+del todo antes del siguiente — no paralelo tipo systemd). `TEST_ELF_EMBER`
+(`elf.rs`) arranca dos "servicios" (`ember-svc0`/`ember-svc1`, hoy
+placeholders de `TEST_ELF_PING_EXIT` registrados en el VFS por el
+comando `ember` de la consola) en orden: `fork()` → hijo `execve()` →
+padre `wait()` + `ping()` del PID reapeado, dos veces seguidas dentro
+del mismo proceso. Confirmado con `ps`: los dos servicios desaparecen
+(memoria liberada de verdad), Ember mismo queda `zombie(code=0)` —
+nadie lo espera, se lanzó directo desde la consola con PPID 0, como
+`forktest`. Probado además lanzando `ember` dos veces seguidas en la
+misma sesión sin fallos (PIDs correctamente reutilizados).
+
+**Limitación documentada a propósito:** un PID 1 real no termina
+nunca — se queda vivo para reapear huérfanos y relanzar servicios
+caídos. Éste sí llama a `exit()` al final de su secuencia de arranque:
+sin preemption real (`preempt.rs`, sigue pendiente), un bucle infinito
+en ring 3 monopolizaría la única CPU cooperativa para siempre y la
+consola de depuración no volvería a responder. Cuando `preempt.rs`
+exista, Ember pasa a quedarse vivo de verdad — pieza aparte. Tampoco
+hay parseo de scripts de shell todavía (eso es Bellows) — la "secuencia
+de servicios" hoy es una lista fija hecha a mano en el propio binario,
+no ficheros `/etc/rc.d/*` leídos en tiempo de arranque.
+
+**Bug real encontrado (no de Ember, preexistente — `m4i-fork-execve`):**
+`sys_execve()` mapeaba la pila de usuario del proceso reemplazado en
+`0x0000_0070_0000_0000` (448 GiB), **por debajo** del límite de 512 GiB
+documentado en `elf.rs` (el punto donde el índice P4 deja de ser
+compartido). El comentario original decía "privado del nuevo espacio",
+pero no lo era — era P4[0], compartido por TODO el kernel. Invisible
+hasta ahora porque ningún binario había llamado a `execve()` dos veces
+en el mismo arranque: la primera llamada dejaba la página mapeada para
+siempre en el P4[0] compartido (`free_address_space` nunca lo toca, a
+propósito — es la tabla del kernel), y la segunda chocaba contra esa
+misma dirección ya ocupada (`"ya había una página mapeada en esa
+dirección virtual"`). `ember` es el primer caso real que ejercita esto
+(dos rondas de `execve()` en el mismo proceso). Movido a
+`0x0000_00C0_0000_0000` (768 GiB, índice P4 = 1, genuinamente privado).
+
 ---
 
 ## 0. Reconstrucción pendiente (importado desde el histórico de chat)
@@ -278,14 +317,16 @@ zip correspondiente. `process.rs` y fork/execve/exit/getpid (milestone
   buen precedente para una versión más rica más adelante
 - ❌ **Memoria compartida (SHM)** — necesaria más adelante para el
   compositor gráfico (ventanas cliente)
-- ❌ **Ember** (nombre propuesto) — sistema de inicialización, PID 1.
-  Primer proceso de userland arrancado por el kernel tras M4c; lanza el
-  resto de servicios/demonios en orden de dependencias. Modelo
-  **rc.d de FreeBSD** (scripts secuenciales simples, no systemd) — cada
-  demonio construido con el patrón **privsep** ya documentado en
-  `PHILOSOPHY.md` (proceso sin privilegios + supervisor mínimo). Sin
-  esto, el kernel arranca pero nada de userland (red, login, Anvil)
-  tiene forma de encenderse solo.
+- ✅ **Ember (primer boceto)** *verificado en QEMU* — modelo rc.d de
+  FreeBSD (secuencial, no systemd), comando `ember` de la consola —
+  ver actualización arriba. **Pendiente para que sea un PID 1 real:**
+  arrancado automáticamente por el kernel (hoy solo a demanda desde la
+  consola, con PPID 0 igual que un test más), lista de servicios real
+  en vez de dos placeholders hardcodeados, permanencia indefinida tras
+  el arranque (necesita `preempt.rs` primero — ver limitación
+  documentada arriba), y el patrón **privsep** ya documentado en
+  `PHILOSOPHY.md` (proceso sin privilegios + supervisor mínimo) para
+  cada demonio real que Ember termine lanzando.
 
 ## 3. Filesystem (M5)
 
