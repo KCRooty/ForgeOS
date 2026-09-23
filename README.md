@@ -12,7 +12,7 @@ Ver [docs/PHILOSOPHY.md](docs/PHILOSOPHY.md) (diseño técnico) y
 [docs/PRODUCT.md](docs/PRODUCT.md) (a quién sirve y por qué) para el
 razonamiento completo detrás de cada decisión.
 
-## Estado: red (RTL8139 TX/RX + ARP/ICMP `ping`), Ember (PID 1, modelo rc.d) y ext2 real de solo lectura — todo verificado en QEMU
+## Estado: red (RTL8139 TX/RX + ARP/ICMP `ping`), Ember (PID 1, modelo rc.d), ext2 real de solo lectura, y escáner GPT/MBR con detección de filesystem (`partinfo`) — todo verificado en QEMU
 
 ## Referencias de arquitectura estudiadas
 - Asmodeus14/Nyx (Rust, QCLang, motor 3D Gen9.5 hand-rolled)
@@ -47,9 +47,19 @@ detecta). Desde la consola de depuración, `ping` hace un ARP + ICMP
 echo completo contra el gateway de slirp (10.0.2.2).
 
 Si existe `disk.img` en la raíz del repo, ambos modos lo adjuntan
-también por AHCI automáticamente — genéralo con:
+también por AHCI automáticamente (con `-boot order=d`, para que SeaBIOS
+no intente arrancar de ese disco en vez del CD-ROM si tiene una firma
+MBR válida) — genéralo con:
 ```bash
 ./tools/make-test-disk.sh   # requiere e2fsprogs (mkfs.ext2, debugfs)
 ```
 Crea un ext2 real de 16 MiB con un par de ficheros de prueba. Desde la
 consola: `ext2ls /`, `ext2cat /hello.txt`.
+
+Para probar el escáner de particiones (`partinfo.rs`), genera y copia
+como `disk.img` cualquiera de los dos discos de:
+```bash
+./tools/make-partinfo-test-disks.sh   # + parted, dosfstools, ntfs-3g, btrfs-progs
+cp partinfo-gpt.img disk.img          # o partinfo-mbr.img
+```
+Desde la consola: `partinfo`.
