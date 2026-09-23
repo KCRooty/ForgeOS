@@ -21,6 +21,8 @@
 use crate::pci::{self, PciDevice};
 use crate::serial_println;
 use alloc::string::{String, ToString};
+use alloc::vec;
+use alloc::vec::Vec;
 
 const AHCI_CLASS: u8 = 0x01; // mass storage
 const AHCI_SUBCLASS: u8 = 0x06; // SATA
@@ -311,6 +313,35 @@ pub fn write_sectors(port: &AhciPort, lba: u64, count: u16, src: &[u8]) -> Resul
         crate::pmm::free_frame(flush_buf);
         flush_result
     }
+}
+
+/// Lee `len` bytes empezando en `byte_offset`, sin importar alineación
+/// a sector — trocea automáticamente en llamadas de máximo 8 sectores
+/// (el límite de un solo PRDT de `read_sectors`). Para cualquier código
+/// que necesite leer un rango de bytes arbitrario (particiones,
+/// superbloques a offsets no alineados como el de btrfs, 0x10040) sin
+/// lidiar con sectores a mano.
+pub fn read_bytes(port: &AhciPort, byte_offset: u64, len: usize) -> Result<Vec<u8>, &'static str> {
+    if len == 0 {
+        return Ok(Vec::new());
+    }
+    let start_sector = byte_offset / 512;
+    let start_off = (byte_offset % 512) as usize;
+    let end_byte = byte_offset + len as u64;
+    let end_sector = end_byte.div_ceil(512);
+    let mut remaining = end_sector - start_sector;
+
+    let mut raw = Vec::with_capacity((remaining * 512) as usize);
+    let mut sector = start_sector;
+    while remaining > 0 {
+        let chunk = core::cmp::min(remaining, 8);
+        let mut buf = vec![0u8; chunk as usize * 512];
+        read_sectors(port, sector, chunk as u16, &mut buf)?;
+        raw.extend_from_slice(&buf);
+        sector += chunk;
+        remaining -= chunk;
+    }
+    Ok(raw[start_off..start_off + len].to_vec())
 }
 
 /// Devuelve el primer puerto AHCI con un disco SATA listo, ya

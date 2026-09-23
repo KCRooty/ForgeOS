@@ -187,6 +187,34 @@ que el ext2 empieza en el LBA 0 del disco entero (`partinfo.rs` es
 milestone aparte); solo lectura, sin journal (ext3/ext4 real de verdad
 es aparte).
 
+**Actualización — `partinfo.rs`, escáner GPT/MBR + detección de
+filesystem (Claude Code, verificado en QEMU contra tablas de
+particiones y filesystems reales):** lee MBR clásico o GPT (detecta
+GPT vía el MBR protector, tipo 0xEE), y para cada partición identifica
+el filesystem por firma real en su contenido — no por el byte de tipo
+de la tabla, que solo se reporta como dato informativo aparte. Comando
+`partinfo`.
+
+**Verificación real, no solo "compila":** `tools/make-partinfo-test-
+disks.sh` (nuevo) genera dos discos con `parted`+`losetup`+`mkfs.*`
+reales (fuera de Forge OS): `partinfo-mbr.img` (MBR, ext4+fat32) y
+`partinfo-gpt.img` (GPT, las 6 combinaciones que sabemos distinguir:
+ext2/ext3/ext4/fat32/ntfs/btrfs). Cada offset (superbloque ext2 a
++1024, `"FAT32   "` a +82, `"NTFS    "` a +3, magic de btrfs a
++0x10040, cabecera GPT en LBA 1 con su tabla de entradas) se contrastó
+primero leyendo los bytes crudos de las imágenes reales con Python
+antes de escribir una sola línea de Rust — los 8 escenarios (2 MBR + 6
+GPT) salieron correctos a la primera en QEMU.
+
+**Encontrado por el camino (infraestructura de pruebas, no un bug de
+Forge OS):** con un disco que tiene una firma MBR válida (0x55AA) de
+verdad, SeaBIOS intenta arrancar desde el disco SATA antes que desde
+el CD-ROM y se queda colgado ahí — sin llegar siquiera a GRUB, cero
+salida por serie. El `disk.img` de `ext2.rs` nunca lo disparó porque no
+tiene tabla de particiones (sector 0 a ceros). Arreglado añadiendo
+`-boot order=d` a `tools/run-qemu.sh` — fuerza arrancar del CD-ROM
+siempre, sin importar qué disco SATA esté adjunto.
+
 ---
 
 ## 0. Reconstrucción pendiente (importado desde el histórico de chat)
@@ -198,8 +226,10 @@ que se pudo importar (`rtl8139-tx`) para los que no llegó a recuperarse el
 zip correspondiente. `process.rs` y fork/execve/exit/getpid (milestone
 `fork-execve`) ya se reconstruyeron y verificaron — ver arriba. Queda:
 
-- ❌ **`partinfo.rs`** — escáner de particiones GPT/MBR, detección de FS
-  (ext2/3/4, btrfs, NTFS, FAT32) (milestone `partinfo-ext4-preempt`)
+- ✅ **`partinfo.rs`** — escáner de particiones GPT/MBR, detección de FS
+  por firma real (ext2/3/4, btrfs, NTFS, FAT32) — parte `partinfo` del
+  milestone `partinfo-ext4-preempt` ya reconstruida y verificada, ver
+  arriba (`preempt.rs`, la otra mitad, sigue pendiente, justo abajo)
 - ❌ **`preempt.rs`** — preemption real vía timer APIC, separado de M4b
   (milestone `partinfo-ext4-preempt`)
 - ✅ **`ext2.rs`** — ext2 clásico real de solo lectura, punteros directos
@@ -535,7 +565,10 @@ zip correspondiente. `process.rs` y fork/execve/exit/getpid (milestone
   arranca en vivo desde el ISO; no hay forma de instalarlo de forma
   permanente en una máquina. Sin esto no es un "sistema operativo" en
   el sentido que tú quieres, es un live-CD para siempre.
-- ❌ **Parser de tabla de particiones** (GPT/MBR)
+- ❌ **Parser de tabla de particiones** (GPT/MBR) — lectura ya existe
+  (`partinfo.rs`, milestone `partinfo-ext4-preempt`, ver sección 0);
+  falta la escritura (crear/modificar tablas), que es lo que un
+  instalador de verdad necesita
 - ❌ **Instalación del bootloader** en el disco de destino
 - ❌ **Strata** — gestor de disco/particiones tipo GParted (nombre
   propuesto). Cadena de dependencias real, de abajo a arriba: driver de
