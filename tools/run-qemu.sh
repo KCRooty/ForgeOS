@@ -6,10 +6,22 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 ISO="$ROOT/ForgeOS.iso"
+DISK="$ROOT/disk.img"
 
 if [ ! -f "$ISO" ]; then
     echo "No existe $ISO — ejecuta primero ./tools/build.sh"
     exit 1
+fi
+
+# disk.img es opcional (comandos ext2ls/ext2cat/disktest sin él
+# simplemente reportan "sin disco") — ./tools/make-test-disk.sh lo
+# genera con un ext2 real de prueba si hace falta.
+DISK_ARGS=()
+if [ -f "$DISK" ]; then
+    DISK_ARGS=(-device ahci,id=ahci0 -drive "if=none,id=disk0,format=raw,file=$DISK" -device ide-hd,drive=disk0,bus=ahci0.0)
+else
+    echo "Aviso: no existe $DISK — arrancando sin disco SATA (ext2ls/ext2cat/disktest no tendrán nada que leer)."
+    echo "       Genera uno con ./tools/make-test-disk.sh"
 fi
 
 if [ "${1:-}" == "--headless" ]; then
@@ -22,6 +34,7 @@ if [ "${1:-}" == "--headless" ]; then
         -m 256M \
         -no-reboot -no-shutdown \
         -nic user,model=rtl8139 \
+        "${DISK_ARGS[@]}" \
         -serial file:"$ROOT/boot.log" \
         -display none
     echo "--- boot.log ---"
@@ -32,6 +45,7 @@ else
         -m 256M \
         -no-reboot \
         -nic user,model=rtl8139 \
+        "${DISK_ARGS[@]}" \
         -serial stdio \
         -vga std
 fi
