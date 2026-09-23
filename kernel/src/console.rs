@@ -10,7 +10,7 @@
 //! Ver docs/SHELL.md para la relación con el shell y el terminal reales.
 
 use crate::serial::SerialPort;
-use crate::{ahci, caps, elf, framebuffer, mmu, net, pci, pmm, process, ring3, rtl8139, scheduler, vfs};
+use crate::{ahci, caps, elf, ext2, framebuffer, mmu, net, pci, pmm, process, ring3, rtl8139, scheduler, vfs};
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::fmt::Write;
@@ -79,7 +79,7 @@ fn dispatch(port: &mut SerialPort, line: &str) {
         "help" => {
             let _ = write!(
                 port,
-                "comandos: help, meminfo, caps, bp, panic, fb, pci, ahci, net, ping, disktest, ls, cat, write, ring3test, synccalltest, synccalldeny, forktest, waittest, exec, ember, ps\r\n"
+                "comandos: help, meminfo, caps, bp, panic, fb, pci, ahci, net, ping, disktest, ls, cat, write, ext2ls, ext2cat, ring3test, synccalltest, synccalldeny, forktest, waittest, exec, ember, ps\r\n"
             );
         }
         "synccalltest" => {
@@ -259,6 +259,16 @@ fn dispatch(port: &mut SerialPort, line: &str) {
                 }
             }
         }
+        "ext2ls" => {
+            let path = parts.next().unwrap_or("/");
+            run_ext2ls(port, path);
+        }
+        "ext2cat" => match parts.next() {
+            Some(path) => run_ext2cat(port, path),
+            None => {
+                let _ = write!(port, "uso: ext2cat <ruta>\r\n");
+            }
+        },
         "pci" => pci::scan_and_print(),
         "ahci" => ahci::probe_and_print(),
         "net" => rtl8139::probe_and_print(),
@@ -493,6 +503,78 @@ fn run_ember(port: &mut SerialPort) {
              (Ember los reapeó con wait(), memoria liberada de verdad); Ember mismo sí queda \
              como zombie(code=0) — nadie lo espera, se lanzó directo desde la consola (PPID 0).\r\n"
         );
+    }
+}
+
+/// Monta el ext2 del primer disco AHCI encontrado — sin tabla de
+/// particiones todavía (`partinfo.rs` es aparte), así que asume que el
+/// filesystem empieza en el LBA 0 del disco entero.
+fn mount_ext2(port: &mut SerialPort) -> Option<ext2::Ext2Fs> {
+    let disk = match ahci::first_disk() {
+        Some(d) => d,
+        None => {
+            let _ = write!(port, "no se encontró ningún disco SATA listo\r\n");
+            return None;
+        }
+    };
+    match ext2::Ext2Fs::mount(disk) {
+        Ok(fs) => Some(fs),
+        Err(e) => {
+            let _ = write!(port, "fallo al montar ext2: {}\r\n", e);
+            None
+        }
+    }
+}
+
+fn run_ext2ls(port: &mut SerialPort, path: &str) {
+    let Some(fs) = mount_ext2(port) else { return };
+    let inode = match fs.resolve(path) {
+        Ok(i) => i,
+        Err(e) => {
+            let _ = write!(port, "{}: {}\r\n", path, e);
+            return;
+        }
+    };
+    if !inode.is_dir() {
+        let _ = write!(port, "{}: no es un directorio\r\n", path);
+        return;
+    }
+    match fs.read_dir(&inode) {
+        Ok(entries) => {
+            for e in entries {
+                let kind = if e.is_dir { "/" } else { "" };
+                let _ = write!(port, "{}{}\r\n", e.name, kind);
+            }
+        }
+        Err(e) => {
+            let _ = write!(port, "fallo al listar: {}\r\n", e);
+        }
+    }
+}
+
+fn run_ext2cat(port: &mut SerialPort, path: &str) {
+    let Some(fs) = mount_ext2(port) else { return };
+    let inode = match fs.resolve(path) {
+        Ok(i) => i,
+        Err(e) => {
+            let _ = write!(port, "{}: {}\r\n", path, e);
+            return;
+        }
+    };
+    if inode.is_dir() {
+        let _ = write!(port, "{}: es un directorio\r\n", path);
+        return;
+    }
+    match fs.read_inode_data(&inode) {
+        Ok(data) => {
+            for byte in data {
+                port.write_byte(byte);
+            }
+            let _ = write!(port, "\r\n");
+        }
+        Err(e) => {
+            let _ = write!(port, "fallo al leer: {}\r\n", e);
+        }
     }
 }
 

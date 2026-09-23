@@ -14,6 +14,7 @@ mod console;
 mod apic;
 mod ahci;
 mod elf;
+mod ext2;
 mod font;
 mod framebuffer;
 mod gdt;

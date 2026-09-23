@@ -12,7 +12,7 @@ Ver [docs/PHILOSOPHY.md](docs/PHILOSOPHY.md) (diseño técnico) y
 [docs/PRODUCT.md](docs/PRODUCT.md) (a quién sirve y por qué) para el
 razonamiento completo detrás de cada decisión.
 
-## Estado: red funcional de extremo a extremo — RTL8139 TX/RX real, ARP + ICMP echo (`ping`) verificados en QEMU contra el gateway de slirp
+## Estado: red (RTL8139 TX/RX + ARP/ICMP `ping`), Ember (PID 1, modelo rc.d) y ext2 real de solo lectura — todo verificado en QEMU
 
 ## Referencias de arquitectura estudiadas
 - Asmodeus14/Nyx (Rust, QCLang, motor 3D Gen9.5 hand-rolled)
@@ -45,3 +45,11 @@ QEMU exponga de verdad una tarjeta RTL8139 por PCI (el modelo por
 defecto sin esta flag es un e1000, que el driver de `rtl8139.rs` ni
 detecta). Desde la consola de depuración, `ping` hace un ARP + ICMP
 echo completo contra el gateway de slirp (10.0.2.2).
+
+Si existe `disk.img` en la raíz del repo, ambos modos lo adjuntan
+también por AHCI automáticamente — genéralo con:
+```bash
+./tools/make-test-disk.sh   # requiere e2fsprogs (mkfs.ext2, debugfs)
+```
+Crea un ext2 real de 16 MiB con un par de ficheros de prueba. Desde la
+consola: `ext2ls /`, `ext2cat /hello.txt`.

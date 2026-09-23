@@ -152,6 +152,41 @@ dirección virtual"`). `ember` es el primer caso real que ejercita esto
 (dos rondas de `execve()` en el mismo proceso). Movido a
 `0x0000_00C0_0000_0000` (768 GiB, índice P4 = 1, genuinamente privado).
 
+**Actualización — ext2 real de solo lectura (Claude Code, verificado en
+QEMU contra un ext2 de verdad):** `ext2.rs` (nuevo) monta un ext2
+clásico (rev1, sin extents/64bit/metadata_csum — eso es ext4), resuelve
+rutas absolutas, lista directorios y lee ficheros completos con
+punteros directos **y** el indirecto simple. Cada campo del
+superbloque/descriptor de grupo/inodo se lee por offset de byte
+explícito (`from_le_bytes`, sin `#[repr(C)]`) para no repetir el susto
+de padding del target-spec JSON. Comandos de consola `ext2ls`/`ext2cat`.
+
+**Verificación real, no solo "compila":** `tools/make-test-disk.sh`
+(nuevo) genera `disk.img` con `mkfs.ext2`+`debugfs` de verdad (fuera de
+Forge OS, en el host) — un ext2 real hecho por herramientas de Linux
+estándar, no por nuestro propio código, así que confirma que *leemos*
+el formato de verdad, no solo que somos consistentes con nosotros
+mismos. Contenido de prueba: `hello.txt` (texto corto), `sub/nested.txt`
+(subdirectorio), y `big.bin` (20 KiB con patrón determinista) — a
+propósito más grande que los 12 bloques directos con bloque de 1 KiB,
+para ejercitar el puntero indirecto simple de verdad. `ext2cat
+/big.bin` se comparó byte a byte contra el original: coincide exacto.
+`tools/run-qemu.sh` adjunta `disk.img` por AHCI automáticamente si
+existe (`-device ahci,id=ahci0` + `-drive`/`-device ide-hd`).
+
+**Bonus no buscado:** con un disco de verdad adjunto por primera vez en
+todo el proyecto, tanto `ahci.rs` (detección + IDENTIFY + lectura del
+MBR) como el comando `disktest` (escritura+relectura real) quedan
+verificados en QEMU por primera vez — antes decían "sin verificar" de
+buena fe, nunca habían tenido un disco SATA real delante.
+
+**Limitaciones documentadas a propósito:** sin doble/triple indirecto
+(ficheros más allá de ~268 bloques con bloque de 1 KiB dan error
+explícito, no truncan en silencio); sin tabla de particiones — asume
+que el ext2 empieza en el LBA 0 del disco entero (`partinfo.rs` es
+milestone aparte); solo lectura, sin journal (ext3/ext4 real de verdad
+es aparte).
+
 ---
 
 ## 0. Reconstrucción pendiente (importado desde el histórico de chat)
@@ -167,8 +202,10 @@ zip correspondiente. `process.rs` y fork/execve/exit/getpid (milestone
   (ext2/3/4, btrfs, NTFS, FAT32) (milestone `partinfo-ext4-preempt`)
 - ❌ **`preempt.rs`** — preemption real vía timer APIC, separado de M4b
   (milestone `partinfo-ext4-preempt`)
-- ❌ **`ext2.rs`** — filesystem ext2/ext4 real de solo lectura, árbol de
-  extents (milestone `ext2`)
+- ✅ **`ext2.rs`** — ext2 clásico real de solo lectura, punteros directos
+  + indirecto simple (milestone `ext2`) ya reconstruido y verificado —
+  ver arriba. **Sin árbol de extents** (eso es ext4, fuera de alcance
+  de esta pasada) ni doble/triple indirecto todavía
 - ✅ **RTL8139 RX real** — bucle de extracción de paquetes del anillo,
   wraparound de `CAPR` (milestone `m5-netrx`) ya reconstruido y
   verificado — ver arriba
@@ -333,18 +370,22 @@ zip correspondiente. `process.rs` y fork/execve/exit/getpid (milestone
 - ✅ **VFS mínimo — tmpfs plano (M5, primer paso)** *borrador sin
   verificar* — `vfs.rs`, namespace plano en memoria (sin directorios
   todavía), write/read/delete/list, probado con escritura+lectura real
-  y comandos `ls`/`cat`/`write` en la consola. **Sin persistencia ni
-  jerarquía de directorios** — siguiente paso: filesystem real sobre
-  AHCI (que ya lee/escribe sectores)
+  y comandos `ls`/`cat`/`write` en la consola. **Sin persistencia** —
+  para eso está `ext2.rs`, ver abajo
 - ❌ **Initramfs/tarfs** — para arrancar userland antes de tener disco
   real montado (patrón usado por los dos Nyx)
-- ❌ **Filesystem persistente real** — ext2 es la opción pragmática
-  (compatible con herramientas externas de Linux para depurar discos
-  desde fuera), o diseñar uno propio — decisión pendiente. **Aspiración
-  a largo plazo inspirada en ZFS** (FreeBSD): bloques con checksum
-  (detección de corrupción de datos) y snapshots copy-on-write — no en
-  v1, pero como dirección de diseño del filesystem propio si se decide
-  no usar ext2 tal cual.
+- ✅ **Filesystem persistente real — ext2 de solo lectura** *verificado
+  en QEMU contra un ext2 real hecho con `mkfs.ext2`/`debugfs`* —
+  `ext2.rs`: superbloque, descriptores de grupo, inodos, directorios
+  (`ext2_dir_entry_2` con `file_type`), lectura de ficheros con
+  punteros directos + indirecto simple. Comandos `ext2ls`/`ext2cat`.
+  Decisión ya tomada: ext2 clásico (compatible con herramientas
+  externas de Linux para depurar discos desde fuera), no un formato
+  propio. **Pendiente:** doble/triple indirecto, ext3/ext4 real
+  (journal, extents), escritura, tabla de particiones (`partinfo.rs`).
+  **Aspiración a largo plazo inspirada en ZFS** (FreeBSD, si algún día
+  se decide un filesystem propio en vez de quedarse en ext2): bloques
+  con checksum y snapshots copy-on-write — no en v1.
 - ❌ **/proc y /dev sintéticos** — Windows y Linux los dan por hecho
   (info de procesos navegable, nodos de dispositivo) — sin esto no se
   siente "como Windows y Linux" ni de lejos
@@ -352,14 +393,16 @@ zip correspondiente. `process.rs` y fork/execve/exit/getpid (milestone
 
 ## 4. HAL — drivers de hardware
 
-- ✅ **Almacenamiento — AHCI (lectura + escritura reales)** *borrador
-  sin verificar* — Command List + Command Table + FIS H2D; `IDENTIFY
-  DEVICE`, **`READ DMA EXT` y `WRITE DMA EXT` (LBA48)** + `FLUSH CACHE
-  EXT`. Verificación por firma MBR 0x55AA al arrancar, y comando
-  `disktest` en la consola para una prueba de escritura+relectura no
-  destructiva. Registros verificados contra Linux. **Limitación
-  actual:** un solo PRDT → máximo 8 sectores (4 KiB) por llamada;
-  transferencias grandes necesitarán múltiples entradas PRDT
+- ✅ **Almacenamiento — AHCI (lectura + escritura reales)** *verificado
+  en QEMU con un disco SATA real adjunto por primera vez (`disk.img`,
+  ver `ext2.rs` arriba y `tools/make-test-disk.sh`)* — Command List +
+  Command Table + FIS H2D; `IDENTIFY DEVICE`, **`READ DMA EXT` y `WRITE
+  DMA EXT` (LBA48)** + `FLUSH CACHE EXT`. Comando `disktest` en la
+  consola (escritura+relectura no destructiva) confirmado, y `ext2.rs`
+  entero corre encima de `read_sectors` de verdad. Registros
+  verificados contra Linux. **Limitación actual:** un solo PRDT →
+  máximo 8 sectores (4 KiB) por llamada; transferencias grandes
+  necesitarán múltiples entradas PRDT
 - ❌ **Almacenamiento — NVMe**
 - ✅ **Red — RTL8139 (TX + RX real)** *verificado en QEMU — registros
   TxStatus/TxAddr/RxBuf/RxConfig/TxConfig verificados contra Linux Y el
