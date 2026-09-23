@@ -64,12 +64,35 @@ pub struct Task {
     /// normal, M4a). Distinto de 0 = PML4 propio (proceso real, M4d) —
     /// el scheduler cambia CR3 a esto al entrarle el turno.
     pub page_table: u64,
-    // guardamos el Box para que el kernel heap no libere la pila
+    /// PID del proceso (`process.rs`) al que pertenece esta tarea — 0
+    /// para un hilo de kernel puro sin identidad de proceso. El
+    /// scheduler lo restaura en `process::CURRENT_PID` en cada cambio
+    /// de tarea (igual que CR3): sin esto, `current_pid()` se quedaba
+    /// pegado al último proceso que arrancó (solo se fijaba una vez,
+    /// en su trampolín) en vez de reflejar quién corre de verdad en
+    /// cada momento — un hijo terminando mientras el padre seguía
+    /// pausado dentro de `wait()` dejaba `current_pid()` apuntando al
+    /// hijo (ya reapeado) cuando el padre se reanudaba.
+    pub pid: u64,
+    /// Pila de kernel PROPIA para atender syscalls de esta tarea — 0
+    /// para los hilos de kernel puros (boot/task_a/task_b) que nunca
+    /// ejecutan `syscall` desde ring 3. El scheduler la activa (via
+    /// `syscall::set_syscall_stack_top`) al entrarle el turno a la
+    /// tarea, igual que ya hace con `page_table`/CR3. Antes de esto,
+    /// TODAS las tareas compartían una única `KERNEL_SYSCALL_STACK`
+    /// global — inofensivo mientras una syscall fuera un viaje de ida
+    /// (`exit()`, nunca se reanuda), pero corrompía cualquier syscall
+    /// que SÍ esperara reanudarse más tarde (`wait()`): si otra tarea
+    /// hacía su propia syscall mientras la primera seguía "pausada"
+    /// dentro de la suya, la pila compartida quedaba pisada.
+    pub kernel_stack_top: u64,
+    // guardamos los Box para que el kernel heap no libere las pilas
     // mientras la tarea exista. `None` para la tarea "placeholder" que
     // representa un flujo de ejecución que YA estaba corriendo (el
     // propio boot) — a esa nunca se salta por `entry`, solo se usa como
     // hueco donde guardar sus registros la primera vez que cede el turno.
     _stack: Option<Box<[u8]>>,
+    _kernel_stack: Option<Box<[u8]>>,
 }
 
 impl Task {
@@ -80,6 +103,20 @@ impl Task {
         let stack = alloc::vec![0u8; STACK_SIZE].into_boxed_slice();
         let stack_bottom = stack.as_ptr() as u64;
         let stack_end = stack_bottom + STACK_SIZE as u64;
+
+        // `mov rsp, [stack_top]` en `syscall_entry` usa esto TAL CUAL
+        // como RSP inicial de la syscall — a diferencia de la pila de
+        // usuario de arriba, esto no pasa por ningún `ret` que ya deje
+        // la alineación correcta por su cuenta, así que hace falta
+        // forzarla a mano: `Vec<u8>` pide align=1 al allocator (bump,
+        // `heap.rs`), así que el puntero devuelto puede caer en
+        // cualquier byte — sin este `& !0xF`, un RSP no alineado a 16
+        // rompe la convención SysV justo antes del `call {handler}`
+        // (que espera RSP%16==8 en la entrada de la función llamada),
+        // corrompiendo quien sabe qué con las instrucciones SSE
+        // alineadas que el código generado pueda usar de por medio.
+        let kernel_stack = alloc::vec![0u8; STACK_SIZE].into_boxed_slice();
+        let kernel_stack_top = (kernel_stack.as_ptr() as u64 + STACK_SIZE as u64) & !0xF;
 
         // Alineación: tras el `ret` de switch_to, que consume 8 bytes de
         // la pila (la dirección de `entry` que dejamos aquí), RSP debe
@@ -104,20 +141,28 @@ impl Task {
             context,
             state: TaskState::Ready,
             page_table: 0,
+            pid: 0,
+            kernel_stack_top,
             _stack: Some(stack),
+            _kernel_stack: Some(kernel_stack),
         }
     }
 
     /// Representa un flujo ya en marcha (el boot). No se salta a nada —
     /// `switch_to` rellenará este `context` con los registros reales la
-    /// primera vez que este "hilo" ceda el turno.
+    /// primera vez que este "hilo" ceda el turno. `kernel_stack_top=0`
+    /// — el boot nunca ejecuta `syscall` desde ring 3 (es kernel puro),
+    /// así que no necesita una pila de syscalls propia.
     pub fn placeholder(id: u64) -> Task {
         Task {
             id,
             context: Context::zero(),
             state: TaskState::Running,
             page_table: 0,
+            pid: 0,
+            kernel_stack_top: 0,
             _stack: None,
+            _kernel_stack: None,
         }
     }
 }

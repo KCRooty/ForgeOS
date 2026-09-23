@@ -258,6 +258,57 @@ pub unsafe fn clone_address_space(src_p4: u64) -> Option<u64> {
     Some(new_p4)
 }
 
+/// Libera recursivamente una subtabla (P3/P2/P1) y las páginas de
+/// datos que cuelgan de ella — el reverso exacto de `clone_subtree`,
+/// liberando frames (`pmm::free_frame`) en vez de copiándolos. Mismo
+/// convenio de `level` (2=P3, 1=P2, 0=P1) y misma salvedad con huge
+/// pages: si aparece una bajo `P4[1..=255]` (no debería, ver
+/// `clone_subtree`), se deja intacta — es memoria compartida del
+/// kernel, nunca del proceso, y jamás se libera desde aquí.
+unsafe fn free_subtree(table: u64, level: u8) {
+    for i in 0..512usize {
+        let entry = *((table + (i as u64) * 8) as *const u64);
+        if entry & PAGE_PRESENT == 0 {
+            continue;
+        }
+        let child = entry & ADDR_MASK;
+        if level == 0 {
+            pmm::free_frame(child); // hoja: página de datos real
+        } else if entry & PAGE_HUGE == 0 {
+            // La llamada recursiva libera `child` ella misma al final
+            // (es su propio parámetro `table`) — no liberarlo aquí
+            // también, sería doble-free.
+            free_subtree(child, level - 1);
+        }
+    }
+    pmm::free_frame(table);
+}
+
+/// Libera TODO lo privado de un espacio de direcciones (`P4[1..=255]`,
+/// incluidas las tablas intermedias y las páginas de datos) más el
+/// propio PML4 — nunca `P4[0]` (kernel/identity-map, compartido, jamás
+/// propiedad de un proceso). Para `wait()`: hasta ahora un proceso
+/// terminado se quedaba zombie para siempre y nadie recuperaba su
+/// memoria — fuga de facto en sesiones largas (`process::reap_zombie`
+/// es el único llamante).
+///
+/// # Safety
+/// `p4` no debe ser el espacio de direcciones ACTIVO (CR3) en este
+/// momento — liberar las tablas bajo tus propios pies sería fatal. El
+/// llamante (`process::reap_zombie`, invocado por el padre sobre el
+/// PML4 de un hijo ya zombie) cumple esto por construcción: un proceso
+/// nunca libera su propio espacio.
+pub unsafe fn free_address_space(p4: u64) {
+    for i in 1..512usize {
+        let entry = *((p4 + (i as u64) * 8) as *const u64);
+        if entry & PAGE_PRESENT == 0 {
+            continue;
+        }
+        free_subtree(entry & ADDR_MASK, 2);
+    }
+    pmm::free_frame(p4);
+}
+
 /// Cambia el espacio de direcciones activo. `p4` debe ser una
 /// dirección física de una tabla PML4 válida (típicamente devuelta por
 /// `create_address_space`).

@@ -79,7 +79,7 @@ fn dispatch(port: &mut SerialPort, line: &str) {
         "help" => {
             let _ = write!(
                 port,
-                "comandos: help, meminfo, caps, bp, panic, fb, pci, ahci, net, disktest, ls, cat, write, ring3test, synccalltest, synccalldeny, forktest, exec, ps\r\n"
+                "comandos: help, meminfo, caps, bp, panic, fb, pci, ahci, net, disktest, ls, cat, write, ring3test, synccalltest, synccalldeny, forktest, waittest, exec, ps\r\n"
             );
         }
         "synccalltest" => {
@@ -154,6 +154,28 @@ fn dispatch(port: &mut SerialPort, line: &str) {
                     scheduler::yield_now();
                 }
                 let _ = write!(port, "de vuelta en la consola — revisa 'ps' para ver el resultado.\r\n");
+            }
+        }
+        "waittest" => {
+            let _ = write!(port, "cargando ELF de fork+wait y arrancandolo como proceso real...\r\n");
+            caps::set_current({
+                let mut c = caps::Capabilities::unrestricted();
+                let _ = c.pledge(caps::CAP_STDIO | caps::CAP_EXEC);
+                c
+            });
+            if let Some(pid) = launch_elf(port, &elf::TEST_ELF_FORK_WAIT, 0) {
+                let _ = write!(port, "PID {} arrancado — cediendo turno...\r\n", pid);
+                // El padre bloquea de verdad dentro de wait() (cede el
+                // turno en bucle hasta que el hijo sea zombie) — un
+                // único yield desde aquí ya dispara toda la cadena:
+                // padre entra en wait(), cede al hijo, el hijo corre
+                // hasta exit(), vuelve al padre que ahora sí encuentra
+                // el zombie, lo recoge (liberando su memoria de verdad)
+                // y sale él también.
+                for _ in 0..2 {
+                    scheduler::yield_now();
+                }
+                let _ = write!(port, "de vuelta en la consola — 'ps' no deberia listar ya al hijo (memoria liberada).\r\n");
             }
         }
         "exec" => {
@@ -251,6 +273,7 @@ fn dispatch(port: &mut SerialPort, line: &str) {
         "meminfo" => {
             let free = pmm::free_frame_count();
             let _ = write!(port, "frames libres: {} (~{} KiB)\r\n", free, free * 4);
+            let _ = write!(port, "heap usado: {} bytes\r\n", crate::heap::used_bytes());
         }
         "caps" => run_caps_demo(port),
         "bp" => unsafe { core::arch::asm!("int3") },
