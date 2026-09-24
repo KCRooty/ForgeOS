@@ -10,7 +10,7 @@
 //! Ver docs/SHELL.md para la relación con el shell y el terminal reales.
 
 use crate::serial::SerialPort;
-use crate::{ahci, caps, elf, ext2, framebuffer, mmu, net, partinfo, pci, pmm, process, ring3, rtl8139, scheduler, vfs};
+use crate::{ahci, apic, caps, elf, ext2, framebuffer, mmu, net, partinfo, pci, pmm, preempt, process, ring3, rtl8139, scheduler, vfs};
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::fmt::Write;
@@ -79,7 +79,7 @@ fn dispatch(port: &mut SerialPort, line: &str) {
         "help" => {
             let _ = write!(
                 port,
-                "comandos: help, meminfo, caps, bp, panic, fb, pci, ahci, net, ping, disktest, partinfo, ls, cat, write, ext2ls, ext2cat, ring3test, synccalltest, synccalldeny, forktest, waittest, exec, ember, ps\r\n"
+                "comandos: help, meminfo, caps, bp, panic, fb, pci, ahci, net, ping, disktest, partinfo, ls, cat, write, ext2ls, ext2cat, ring3test, synccalltest, synccalldeny, forktest, waittest, exec, ember, preempttest, ps\r\n"
             );
         }
         "synccalltest" => {
@@ -196,6 +196,7 @@ fn dispatch(port: &mut SerialPort, line: &str) {
             }
         }
         "ember" => run_ember(port),
+        "preempttest" => run_preempt_test(port),
         "ps" => {
             let _ = write!(port, "PID  PPID  ESTADO\r\n");
             for p in process::list() {
@@ -611,6 +612,45 @@ fn run_ext2cat(port: &mut SerialPort, path: &str) {
         Err(e) => {
             let _ = write!(port, "fallo al leer: {}\r\n", e);
         }
+    }
+}
+
+/// Prueba real de preemption: dos tareas de kernel (`preempt::spin_a`/
+/// `spin_b`) que jamás llaman a `yield_now()` por su cuenta — si
+/// avanzan de todos modos mientras el timer las interrumpe, es la
+/// prueba de que el scheduler las está forzando a ceder el turno, no
+/// de que se portan bien. Acotado a propósito (`preempt::set_enabled`
+/// solo dura lo que tarda este bucle) — ver la nota larga en
+/// `preempt.rs` sobre por qué la preemption real NO está encendida por
+/// defecto para el resto del arranque/consola.
+fn run_preempt_test(port: &mut SerialPort) {
+    let _ = write!(port, "arrancando dos tareas que nunca ceden el turno por su cuenta...\r\n");
+    preempt::spawn_spin_tasks();
+    let (a0, b0) = preempt::spin_counts();
+    let ticks0 = apic::tick_count();
+
+    let _ = write!(port, "activando preemption real (timer -> scheduler) durante 20 ticks...\r\n");
+    preempt::set_enabled(true);
+    while apic::tick_count() < ticks0 + 20 {
+        unsafe { core::arch::asm!("hlt") };
+    }
+    preempt::set_enabled(false);
+
+    let (a1, b1) = preempt::spin_counts();
+    let _ = write!(
+        port,
+        "preemption desactivada de nuevo — {} ticks reales\r\n",
+        apic::tick_count() - ticks0
+    );
+    let _ = write!(port, "tarea A: {} -> {} (avanzo {})\r\n", a0, a1, a1 - a0);
+    let _ = write!(port, "tarea B: {} -> {} (avanzo {})\r\n", b0, b1, b1 - b0);
+    if a1 > a0 && b1 > b0 {
+        let _ = write!(
+            port,
+            "preemption real confirmada: ambas avanzaron sin llamar a yield_now() nunca\r\n"
+        );
+    } else {
+        let _ = write!(port, "AVISO: alguna de las dos no avanzo — revisar\r\n");
     }
 }
 
