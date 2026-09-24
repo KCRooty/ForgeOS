@@ -28,6 +28,7 @@ mod partinfo;
 mod pci;
 mod pic;
 mod pipe;
+mod preempt;
 mod pmm;
 mod process;
 mod psf;
@@ -304,12 +305,13 @@ pub extern "C" fn kernel_main_upper(mb2_info_ptr: u64) -> ! {
     // TODO M2c: syscalls reales — aquí `caps::enforce` pasa a llamarse
     //           por cada una
     // TODO M3c: ampliar el alfabeto de font.rs más allá de F/O/R/G/E/S/B/T/K
-    // TODO M4b (continuación): conectar el timer con el scheduler para
-    //           preemption real — necesita guardar TODOS los registros
-    //           de propósito general desde el handler asíncrono, no solo
-    //           los callee-saved de task.rs
-    // TODO M4c: espacios de direcciones por tarea (necesita gestor de
-    //           memoria virtual real, ver TODO.md §1) — de ahí a fork/exec
+    // M4b (continuación) — timer conectado al scheduler de verdad,
+    //           ver preempt.rs y el comando `preempttest`. Apagado por
+    //           defecto (preempt::ENABLED) para no cambiar el resto del
+    //           arranque; sin preemption real en ring 3 todavía (ver
+    //           limitación documentada en preempt.rs)
+    // TODO: RSP0 por tarea (gdt.rs) — necesario antes de poder extender
+    //           preempt.rs a procesos de ring 3 con seguridad
     // TODO M6+: Anvil + terminal ("Crucible")
 
     // M4g — mecanismo syscall/sysret listo (MSRs configuradas). El

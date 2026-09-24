@@ -1,20 +1,18 @@
-//! Local APIC + timer periódico — M4b, primer paso (BORRADOR SIN
-//! VERIFICAR).
+//! Local APIC + timer periódico — M4b.
 //!
 //! Habilita el Local APIC y programa un timer periódico que dispara una
-//! interrupción real por hardware. Esto NO conecta todavía esa
-//! interrupción con el scheduler para hacer preemption de verdad — eso
-//! es el siguiente paso, y es más delicado: un handler asíncrono tiene
-//! que guardar TODOS los registros de propósito general (puede
-//! interrumpir al proceso en cualquier punto), no solo los
-//! callee-saved como el cambio de contexto cooperativo de task.rs. De
-//! momento esto solo demuestra que el timer late de verdad.
+//! interrupción real por hardware. Desde el milestone `preempt`
+//! (`preempt.rs`), esa interrupción SÍ está conectada al scheduler de
+//! verdad — este fichero solo se ocupa del propio Local APIC (init,
+//! armado del timer, contador de ticks, EOI); el trampolín de entrada y
+//! la decisión de ceder el turno viven en `preempt.rs`, deliberadamente
+//! separados: aquí es "hardware del timer", allí es "qué hacer cuando
+//! late".
 //!
 //! Requiere el identity-map ampliado a 4 GiB de boot.asm — el Local
 //! APIC vive en memoria física ~0xFEE00000, muy por encima del primer
 //! GiB que teníamos mapeado antes de esta ronda.
 
-use crate::idt::InterruptStackFrame;
 use crate::serial_println;
 use core::sync::atomic::{AtomicU64, Ordering};
 
@@ -83,10 +81,16 @@ pub fn tick_count() -> u64 {
     TICKS.load(Ordering::Relaxed)
 }
 
-/// Handler de la interrupción del timer. De momento SOLO cuenta ticks y
-/// manda EOI — todavía no interrumpe una tarea en marcha para hacer
-/// preemption real (ver cabecera del fichero).
-pub extern "x86-interrupt" fn timer_interrupt_handler(_frame: InterruptStackFrame) {
+/// Incrementa el contador de ticks — llamado desde `preempt::timer_entry`
+/// (el trampolín real que sustituye al handler de este fichero desde el
+/// milestone `preempt`, ver `preempt.rs`).
+pub fn note_tick() {
     TICKS.fetch_add(1, Ordering::Relaxed);
-    unsafe { reg_write(REG_EOI, 0) };
+}
+
+/// Manda End Of Interrupt al Local APIC — sin esto, el controlador
+/// nunca entrega la siguiente interrupción del mismo vector (o de
+/// prioridad igual/menor). Llamado desde `preempt::timer_entry`.
+pub unsafe fn send_eoi() {
+    reg_write(REG_EOI, 0);
 }
