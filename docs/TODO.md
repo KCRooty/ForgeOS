@@ -215,6 +215,62 @@ tiene tabla de particiones (sector 0 a ceros). Arreglado añadiendo
 `-boot order=d` a `tools/run-qemu.sh` — fuerza arrancar del CD-ROM
 siempre, sin importar qué disco SATA esté adjunto.
 
+**Actualización — `preempt.rs`, preemption real vía timer APIC (Claude
+Code, verificado en QEMU):** el timer de M4b llevaba disparando desde
+el primer arranque, pero su handler original solo contaba ticks y
+mandaba EOI — nunca tocaba el scheduler. Ahora `preempt::timer_entry`
+(trampolín en ensamblador desnudo, mismo patrón que `syscall_entry` en
+`syscall.rs`: guardar los 15 registros de propósito general a mano
+antes de tocar Rust, porque una interrupción puede caer en cualquier
+punto del código interrumpido) sustituye a ese handler. Cuando
+interrumpe una tarea de kernel (CPL0), llama de verdad a
+`scheduler::yield_now()` — reutilizando el `task::switch_to`
+cooperativo de siempre, no un mecanismo nuevo (ver la nota larga en
+`preempt.rs` sobre por qué eso es seguro y simétrico).
+
+**Verificado con el peor caso posible, no el más fácil:** el comando
+`preempttest` arranca dos tareas (`spin_a`/`spin_b`) que jamás llaman a
+`yield_now()` por su cuenta — un bucle `loop { count += 1 }` puro, sin
+ceder el turno nunca. Con la preemption activada, ambas avanzaron más
+de 13 millones de iteraciones cada una en 21 ticks, de forma
+intercalada — la única explicación posible es que el timer las está
+forzando a ceder el turno de verdad. `task_a`/`task_b` (la demo
+cooperativa de M4a, que nunca termina) también recibieron turnos
+extra durante la ventana de la prueba, señal de que el round-robin
+reparte con justicia entre tareas viejas y nuevas por igual.
+
+**Por qué la preemption no está encendida por defecto:** el propio
+timer sigue armado y disparando desde M4b durante TODO el arranque
+(VFS, red, syscalls, `console::run()`...), pero antes de este
+milestone eso era inofensivo (el handler no hacía nada más que
+contar). Encenderla de golpe para el resto del arranque habría
+cambiado el comportamiento de código ya verificado en milestones
+anteriores sin que ninguno de ellos lo hubiera tenido en cuenta —
+`task_a`/`task_b`, que nunca terminan, habrían empezado a imprimir sin
+parar, y la consola habría competido por CPU con ellas. En vez de eso,
+`preempt::ENABLED` (flag global, `false` por defecto) decide si
+`timer_tick_ring0` llega a llamar a `yield_now()` — el timer sigue
+contando ticks y mandando EOI siempre, pero solo cambia de tarea
+cuando algo lo pide explícitamente (`preempttest`, de momento). El
+resto del arranque queda exactamente igual que antes, byte a byte en
+el log de serie — verificado comparando el arranque normal antes y
+después de este cambio.
+
+**Limitación documentada a propósito: sin preemption real en ring 3
+todavía.** El trampolín SÍ distingue si interrumpió una tarea de
+kernel (CPL0) o un proceso de usuario (CPL3) — mirando el CS que el
+hardware dejó en la pila, en un offset fijo sin importar cuántos qwords
+empujara. Para CPL3 solo hace EOI y vuelve, sin tocar el scheduler.
+Motivo concreto: `gdt.rs` usa un único `TSS.RSP0` global para TODAS las
+transiciones ring3→ring0 por interrupción (a diferencia de la pila de
+syscalls, que sí es per-tarea desde `wait()`) — si dos procesos de
+ring 3 quedaran aparcados a la vez en esa misma pila compartida, el
+segundo pisaría el estado del primero (mismo bug de fondo que la pila
+de syscalls compartida, ya arreglado ahí). Extender esto a CPL3 de
+verdad necesita un `RSP0` por tarea primero, pieza aparte — hasta
+entonces, Ember sigue sin poder quedarse viva para siempre de forma
+segura (ver su propia nota).
+
 ---
 
 ## 0. Reconstrucción pendiente (importado desde el histórico de chat)
@@ -229,9 +285,11 @@ zip correspondiente. `process.rs` y fork/execve/exit/getpid (milestone
 - ✅ **`partinfo.rs`** — escáner de particiones GPT/MBR, detección de FS
   por firma real (ext2/3/4, btrfs, NTFS, FAT32) — parte `partinfo` del
   milestone `partinfo-ext4-preempt` ya reconstruida y verificada, ver
-  arriba (`preempt.rs`, la otra mitad, sigue pendiente, justo abajo)
-- ❌ **`preempt.rs`** — preemption real vía timer APIC, separado de M4b
-  (milestone `partinfo-ext4-preempt`)
+  arriba
+- ✅ **`preempt.rs`** — preemption real vía timer APIC, separado de M4b
+  (milestone `partinfo-ext4-preempt`, segunda mitad) ya reconstruido y
+  verificado — ver arriba. **Sin preemption real en ring 3 todavía**
+  (necesita `TSS.RSP0` por tarea primero, ver limitación documentada)
 - ✅ **`ext2.rs`** — ext2 clásico real de solo lectura, punteros directos
   + indirecto simple (milestone `ext2`) ya reconstruido y verificado —
   ver arriba. **Sin árbol de extents** (eso es ext4, fuera de alcance
@@ -321,7 +379,8 @@ zip correspondiente. `process.rs` y fork/execve/exit/getpid (milestone
   3). Probado con `TEST_ELF_RING3` — payload sin instrucciones
   privilegiadas (`jmp $`, no `hlt`, que provocaría `#GP` en ring 3).
   Comando `ring3test` en la consola, **viaje solo de ida a propósito**:
-  sin preemption conectada (M4b, parte pendiente), no hay forma de
+  `preempt.rs` ya existe pero todavía sin preemption real en ring 3
+  (ver su limitación documentada), así que sigue sin haber forma de
   recuperar el control tras saltar — por diseño no se ejecuta en el
   arranque automático, solo a demanda
 - ✅ **Syscalls reales — `syscall`/`sysret` (M4g)** *borrador sin
