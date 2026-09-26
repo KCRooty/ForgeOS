@@ -79,7 +79,7 @@ fn dispatch(port: &mut SerialPort, line: &str) {
         "help" => {
             let _ = write!(
                 port,
-                "comandos: help, meminfo, caps, bp, panic, fb, pci, ahci, net, ping, disktest, partinfo, ls, cat, write, ext2ls, ext2cat, ring3test, synccalltest, synccalldeny, forktest, waittest, exec, ember, preempttest, segvtest, killtest, ps\r\n"
+                "comandos: help, meminfo, caps, bp, panic, fb, pci, ahci, net, ping, disktest, partinfo, ls, cat, write, ext2ls, ext2cat, ring3test, synccalltest, synccalldeny, forktest, waittest, exec, ember, preempttest, preempttest3, segvtest, killtest, ps\r\n"
             );
         }
         "synccalltest" => {
@@ -197,6 +197,7 @@ fn dispatch(port: &mut SerialPort, line: &str) {
         }
         "ember" => run_ember(port),
         "preempttest" => run_preempt_test(port),
+        "preempttest3" => run_preempt_test3(port),
         "segvtest" => run_segv_test(port),
         "killtest" => run_kill_test(port),
         "ps" => {
@@ -653,6 +654,64 @@ fn run_preempt_test(port: &mut SerialPort) {
         );
     } else {
         let _ = write!(port, "AVISO: alguna de las dos no avanzo — revisar\r\n");
+    }
+}
+
+/// Prueba de preemption real en RING 3: `TEST_ELF_SPIN3` nunca ejecuta
+/// `syscall` — nunca cede el turno por su cuenta de ninguna manera,
+/// cooperativa o no. Antes de que `preempt.rs` tuviera `TSS.RSP0` por
+/// tarea, esto habría sido justo el caso que `preempt.rs` documentaba
+/// como "no soportado todavía". Verificación por fuera: en vez de
+/// preguntarle al proceso (no puede contestar, nunca hace una
+/// syscall), leemos directamente su memoria vía `mmu::translate` —
+/// el mismo contador que él mismo incrementa en su propia pila de
+/// usuario.
+fn run_preempt_test3(port: &mut SerialPort) {
+    const COUNTER_VADDR: u64 = 0x0000_0090_0000_0000;
+
+    let _ = write!(port, "arrancando un proceso de ring 3 que NUNCA ejecuta syscall...\r\n");
+    caps::set_current(caps::Capabilities::unrestricted());
+    let Some(pid) = launch_elf(port, &elf::TEST_ELF_SPIN3, 0) else {
+        return;
+    };
+    let Some(pcb) = process::find(pid) else {
+        let _ = write!(port, "PID {} no se registró en la tabla de procesos\r\n", pid);
+        return;
+    };
+
+    let read_counter = || -> u64 {
+        unsafe {
+            match mmu::translate(pcb.page_table, COUNTER_VADDR) {
+                Some(phys) => (phys as *const u64).read_volatile(),
+                None => 0,
+            }
+        }
+    };
+
+    let c0 = read_counter();
+    let ticks0 = apic::tick_count();
+
+    let _ = write!(port, "activando preemption real durante 20 ticks...\r\n");
+    preempt::set_enabled(true);
+    while apic::tick_count() < ticks0 + 20 {
+        unsafe { core::arch::asm!("hlt") };
+    }
+    preempt::set_enabled(false);
+
+    let c1 = read_counter();
+    let _ = write!(
+        port,
+        "preemption desactivada de nuevo — {} ticks reales\r\n",
+        apic::tick_count() - ticks0
+    );
+    let _ = write!(port, "contador del proceso PID {}: {} -> {} (avanzo {})\r\n", pid, c0, c1, c1.wrapping_sub(c0));
+    if c1 > c0 {
+        let _ = write!(
+            port,
+            "preemption real en ring 3 confirmada: el proceso avanzo sin ejecutar 'syscall' ni una vez\r\n"
+        );
+    } else {
+        let _ = write!(port, "AVISO: el contador no avanzo — revisar\r\n");
     }
 }
 
