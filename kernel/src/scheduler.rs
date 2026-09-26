@@ -71,6 +71,31 @@ pub fn mark_current_finished() {
     }
 }
 
+/// Marca como `Finished` la tarea cuyo `Task::pid` coincida —a
+/// diferencia de `mark_current_finished()`, no hace falta que sea la
+/// tarea en ejecución ahora mismo. Para `signal::deliver_default`: matar
+/// un proceso desde OTRO (`kill()`) o desde un manejador de excepción
+/// (`SIGSEGV` en `idt.rs`) necesita poder sacar del round-robin a una
+/// tarea que no es la que está corriendo en este instante. `false` si
+/// ningún `Task` tenía ese PID (no debería pasar si `process::find`
+/// encontró el PCB — pid=0 nunca se usa para un proceso real, así que
+/// no hay ambigüedad con los hilos de kernel puros).
+pub fn mark_finished_by_pid(pid: u64) -> bool {
+    unsafe {
+        let sched = match (*SCHEDULER.0.get()).as_mut() {
+            Some(s) => s,
+            None => return false,
+        };
+        for task in sched.tasks.iter_mut() {
+            if task.pid == pid {
+                task.state = TaskState::Finished;
+                return true;
+            }
+        }
+        false
+    }
+}
+
 /// Cede el turno a la siguiente tarea `Ready`/`Running` de la cola
 /// (round-robin, saltando las `Finished`). Si no hay ninguna otra tarea
 /// elegible (o el scheduler no está inicializado), no hace nada.

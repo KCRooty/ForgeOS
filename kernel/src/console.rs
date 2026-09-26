@@ -79,7 +79,7 @@ fn dispatch(port: &mut SerialPort, line: &str) {
         "help" => {
             let _ = write!(
                 port,
-                "comandos: help, meminfo, caps, bp, panic, fb, pci, ahci, net, ping, disktest, partinfo, ls, cat, write, ext2ls, ext2cat, ring3test, synccalltest, synccalldeny, forktest, waittest, exec, ember, preempttest, ps\r\n"
+                "comandos: help, meminfo, caps, bp, panic, fb, pci, ahci, net, ping, disktest, partinfo, ls, cat, write, ext2ls, ext2cat, ring3test, synccalltest, synccalldeny, forktest, waittest, exec, ember, preempttest, segvtest, killtest, ps\r\n"
             );
         }
         "synccalltest" => {
@@ -197,6 +197,8 @@ fn dispatch(port: &mut SerialPort, line: &str) {
         }
         "ember" => run_ember(port),
         "preempttest" => run_preempt_test(port),
+        "segvtest" => run_segv_test(port),
+        "killtest" => run_kill_test(port),
         "ps" => {
             let _ = write!(port, "PID  PPID  ESTADO\r\n");
             for p in process::list() {
@@ -651,6 +653,48 @@ fn run_preempt_test(port: &mut SerialPort) {
         );
     } else {
         let _ = write!(port, "AVISO: alguna de las dos no avanzo — revisar\r\n");
+    }
+}
+
+/// Dispara un fallo de página real en ring 3 a propósito
+/// (`TEST_ELF_SEGV`) — antes de `signal.rs`, esto colgaba el kernel
+/// entero (`halt()` incondicional en `idt.rs::page_fault`). Ahora solo
+/// debería matar al proceso: la consola tiene que seguir respondiendo
+/// después, y `ps` debería mostrarlo `zombie(code=139)` (128+SIGSEGV).
+fn run_segv_test(port: &mut SerialPort) {
+    let _ = write!(port, "arrancando un proceso que escribe a la dirección 0 a propósito...\r\n");
+    caps::set_current(caps::Capabilities::unrestricted());
+    if let Some(pid) = launch_elf(port, &elf::TEST_ELF_SEGV, 0) {
+        let _ = write!(port, "PID {} arrancado — cediendo turno...\r\n", pid);
+        for _ in 0..2 {
+            scheduler::yield_now();
+        }
+        let _ = write!(
+            port,
+            "de vuelta en la consola — si ves esto, el kernel sobrevivió al fallo de página \
+             (revisa 'ps': debería quedar zombie(code=139), 128+SIGSEGV).\r\n"
+        );
+    }
+}
+
+/// `fork()` + `kill(hijo, SIGTERM)` desde el padre, antes de que el
+/// hijo llegue a correr — ver la nota larga en `elf.rs::TEST_ELF_KILL`.
+fn run_kill_test(port: &mut SerialPort) {
+    let _ = write!(port, "cargando ELF de fork+kill y arrancandolo como proceso real...\r\n");
+    caps::set_current({
+        let mut c = caps::Capabilities::unrestricted();
+        let _ = c.pledge(caps::CAP_STDIO | caps::CAP_EXEC | caps::CAP_PROC_CTL);
+        c
+    });
+    if let Some(pid) = launch_elf(port, &elf::TEST_ELF_KILL, 0) {
+        let _ = write!(port, "PID {} arrancado — cediendo turno...\r\n", pid);
+        for _ in 0..2 {
+            scheduler::yield_now();
+        }
+        let _ = write!(
+            port,
+            "de vuelta en la consola — 'ps' no deberia listar ya al hijo (kill()+wait() lo reapeo).\r\n"
+        );
     }
 }
 
