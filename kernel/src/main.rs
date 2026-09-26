@@ -38,6 +38,7 @@ mod syscall;
 mod vfs;
 mod scheduler;
 mod serial;
+mod signal;
 mod task;
 
 use alloc::boxed::Box;

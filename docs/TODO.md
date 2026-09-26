@@ -271,6 +271,64 @@ verdad necesita un `RSP0` por tarea primero, pieza aparte — hasta
 entonces, Ember sigue sin poder quedarse viva para siempre de forma
 segura (ver su propia nota).
 
+**Actualización — señales: SIGKILL/SIGTERM/SIGSEGV (Claude Code,
+verificado en QEMU) — último punto pendiente del TODO original de esta
+reconstrucción.** Alcance a propósito acotado: solo la acción por
+defecto de cada señal (terminar el proceso) — nadie puede instalar un
+manejador propio todavía, eso necesita una máscara de señales
+pendientes por proceso + un trampolín de `sigreturn`, pieza bastante
+más grande, aparte.
+
+- `signal.rs` (nuevo): `deliver_default(pid, sig)` — marca el proceso
+  zombie con código `128 + señal` (convención de shell, distinguible de
+  un `exit(N)` normal con solo mirar `ps`) y lo saca del round-robin
+  del scheduler (`scheduler::mark_finished_by_pid`, nuevo — a
+  diferencia de `mark_current_finished()`, no hace falta que sea la
+  tarea en ejecución ahora mismo).
+- `SYS_KILL` (=62, numeración Linux) — `kill(pid, señal)` desde
+  cualquier proceso con `CAP_PROC_CTL` (capability nueva en `caps.rs`,
+  más restrictiva que `CAP_EXEC`). Comando `killtest`: un padre mata a
+  su hijo con `SIGTERM` ANTES de que el hijo llegue a ejecutar una sola
+  instrucción, y luego `wait()` lo recoge exactamente igual que si
+  hubiera hecho `exit()` él solo — mismo camino en `process.rs`,
+  confirmado.
+- `idt.rs::page_fault` — antes hacía `halt()` incondicional ante
+  CUALQUIER fallo de página; ahora distingue si vino de ring 3 (mirando
+  el CS que dejó el hardware, mismo truco que `preempt::timer_entry`) y
+  en ese caso mata solo al proceso (`SIGSEGV`) en vez de colgar el
+  kernel entero. Comando `segvtest`: un proceso escribe a la dirección
+  0 a propósito — la consola sigue viva después, `ps` lo muestra
+  `zombie(code=139)`.
+
+**Bug real encontrado (y arreglado) durante la verificación, no antes
+de ella:** la primera versión de `deliver_default` llamaba a
+`mmu::free_address_space` incondicionalmente. Para un `SIGSEGV`
+auto-infligido (el caso normal: el proceso que revienta ES el que está
+corriendo), eso libera el PML4 que **CR3 tiene activo en ese mismo
+instante** — exactamente lo que `free_address_space` prohíbe en su
+propia documentación ("liberar las tablas bajo tus propios pies sería
+fatal"). Sin diagnóstico previo, `segvtest` en sí parecía funcionar
+(la consola seguía viva) pero el siguiente `ping` colgaba el kernel de
+verdad (page fault en ring 0, `error_code` de escritura) — el PML4
+recién liberado se reciclaba para el buffer RX del RTL8139 antes de
+que el scheduler llegara a cambiar de espacio de direcciones.
+Aislado comparando contra `waittest` (que también libera una dirección
+de espacio, vía `reap_zombie`, y no lo dispara — porque ahí quien
+libera SIEMPRE es el padre, con su propia CR3 activa, nunca la del
+proceso que se está liberando). Arreglado: `deliver_default` solo
+libera de inmediato si `pid` NO es el proceso activo ahora mismo; si lo
+es, la memoria queda pendiente para quien le haga `wait()` más
+adelante — mismo comportamiento que ya tiene cualquier `exit()` normal
+sin padre esperando.
+
+También se encontró y arregló, en el camino, el mismo `sti` que ya
+hizo falta en `sys_exit()` y en `preempt::timer_tick_ring0()` —
+`page_fault` es OTRO gate de interrupción que enmascara IF al entrar;
+sin reactivarlo antes de `yield_now()`, la consola se quedaba con
+interrupciones enmascaradas para siempre (viva de mentira: ya había
+impreso el prompt, pero el `hlt` de `read_line()` no despertaba nunca
+más).
+
 ---
 
 ## 0. Reconstrucción pendiente (importado desde el histórico de chat)
@@ -430,7 +488,10 @@ zip correspondiente. `process.rs` y fork/execve/exit/getpid (milestone
   propio PML4, nunca P4[0]). Comando de consola `waittest`
   (`elf::TEST_ELF_FORK_WAIT`) — confirmado con `ps`: el hijo desaparece
   de la tabla tras `wait()`, ya no queda zombie para siempre.
-- ❌ **Señales** (signals) — al menos SIGKILL/SIGTERM/SIGSEGV
+- ✅ **Señales — SIGKILL/SIGTERM/SIGSEGV** *verificado en QEMU* — ver
+  actualización arriba. Solo acción por defecto (terminar); **sin
+  manejadores propios instalables todavía** — necesita máscara de
+  señales por proceso + trampolín `sigreturn`, pieza aparte
 - ✅ **Dispatcher de syscalls real** *verificado en QEMU* — ya no es
   demo aislada: `caps::enforce_current` protege `SYS_PING`, `CAP_EXEC`
   protege `SYS_FORK`/`SYS_EXECVE`

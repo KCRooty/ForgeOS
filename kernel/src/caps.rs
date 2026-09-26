@@ -22,6 +22,7 @@ pub const CAP_MEM_MAP: CapMask = 1 << 5; // mmap/sbrk más allá del heap inicia
 pub const CAP_TIME: CapMask = 1 << 6;
 pub const CAP_IPC: CapMask = 1 << 7;
 pub const CAP_GFX: CapMask = 1 << 8; // framebuffer / GPU
+pub const CAP_PROC_CTL: CapMask = 1 << 9; // kill() a OTROS procesos — más peligroso que CAP_EXEC (fork/exec de uno mismo)
 
 /// Máscara con todas las capacidades — solo válida para el propio kernel
 /// antes de que exista tabla de procesos real (M1-M3). A partir de M4,

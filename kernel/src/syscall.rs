@@ -21,6 +21,7 @@ use crate::process;
 use crate::ring3;
 use crate::scheduler;
 use crate::serial_println;
+use crate::signal;
 use crate::vfs;
 
 const IA32_EFER: u32 = 0xC000_0080;
@@ -67,6 +68,7 @@ pub const SYS_FORK: u64 = 57;
 pub const SYS_EXECVE: u64 = 59;
 pub const SYS_EXIT: u64 = 60;
 pub const SYS_WAIT: u64 = 61; // == wait4 en Linux x86_64; no hay "wait" clásica en esa ABI
+pub const SYS_KILL: u64 = 62;
 
 /// Argumentos de una syscall, en el orden `syscall/sysret` de Linux
 /// x86_64 (RAX=número, RDI/RSI/RDX/R10/R8/R9=args) — ya documentado en
@@ -228,6 +230,7 @@ extern "C" fn syscall_dispatch(frame: *mut SyscallFrame) -> u64 {
         }
         SYS_EXIT => sys_exit(frame),
         SYS_WAIT => sys_wait(frame),
+        SYS_KILL => sys_kill(frame),
         other => {
             serial_println!("[syscall] número desconocido: {}", other);
             u64::MAX
@@ -361,6 +364,42 @@ fn sys_wait(frame: &SyscallFrame) -> u64 {
         }
         scheduler::yield_now();
     }
+}
+
+/// `kill()` — `arg0` = PID objetivo, `arg1` = número de señal. Solo
+/// acción por defecto (terminar), sin manejadores propios todavía — ver
+/// `signal.rs`. Si el objetivo es UNO MISMO, el espacio de direcciones
+/// que `sysretq` necesitaría para volver a ring 3 ya no existe cuando
+/// `deliver_default` termina — mismo camino divergente que `sys_exit()`
+/// (`sti` + ceder el turno para siempre), nunca volvemos normalmente.
+fn sys_kill(frame: &SyscallFrame) -> u64 {
+    if let Err(v) = caps::enforce_current(caps::CAP_PROC_CTL) {
+        serial_println!(
+            "[syscall] SYS_KILL DENEGADO — pedido=0x{:x}, otorgado=0x{:x} (falta CAP_PROC_CTL)",
+            v.requested,
+            v.granted
+        );
+        return u64::MAX;
+    }
+
+    let target = frame.arg0;
+    let sig = frame.arg1 as u32;
+    let caller = process::current_pid();
+
+    if !signal::deliver_default(target, sig) {
+        serial_println!("[syscall] kill: PID {} -> PID {} falló (no existe o ya era zombie)", caller, target);
+        return u64::MAX;
+    }
+    serial_println!("[syscall] kill: PID {} mandó señal {} a PID {}", caller, sig, target);
+
+    if target == caller {
+        unsafe { core::arch::asm!("sti") };
+        loop {
+            scheduler::yield_now();
+        }
+    }
+
+    0
 }
 
 /// `execve()` — reemplaza el proceso actual por un binario nuevo.
