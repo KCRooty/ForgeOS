@@ -329,6 +329,38 @@ interrupciones enmascaradas para siempre (viva de mentira: ya había
 impreso el prompt, pero el `hlt` de `read_line()` no despertaba nunca
 más).
 
+**Actualización — preemption real también en ring 3 (Claude Code,
+verificado en QEMU):** cierra el hueco que `preempt.rs` había dejado a
+propósito abierto. `gdt::set_rsp0` (nuevo) hace `TSS.RSP0` per-tarea —
+`scheduler::yield_now()` lo activa con el mismo valor que ya usa
+`Task::kernel_stack_top` para la pila de syscalls (seguro compartirlo:
+un `syscall` y una interrupción nunca están "en vuelo" a la vez para la
+MISMA tarea). Con eso, el motivo original para tratar CPL0 y CPL3 de
+forma distinta desaparece — `preempt::timer_entry` pierde la rama por
+completo, un único camino sirve para cualquier nivel de privilegio
+interrumpido (nunca interpreta el frame que deja el hardware, solo
+apila encima y desapila lo mismo antes de `iretq`).
+
+**Verificado con el peor caso posible:** `TEST_ELF_SPIN3` no ejecuta
+`syscall` NI UNA VEZ — un bucle `inc qword [pila_de_usuario]` puro en
+ring 3. Comando `preempttest3`: con la preemption activada, el proceso
+avanzó casi 13 millones de iteraciones en 20 ticks (verificado leyendo
+su memoria por fuera, vía `mmu::translate` — el proceso nunca hace una
+syscall con la que "contestar"), y la consola (que tampoco cede el
+turno por su cuenta mientras espera) siguió recibiendo turnos con
+normalidad. `segvtest`/`killtest` (ambos también ring 3) siguen
+funcionando exactamente igual bajo el nuevo `RSP0` compartido con la
+pila de syscalls.
+
+**Lo que NO cambia todavía, a propósito:** Ember (`elf.rs`) sigue
+llamando a `exit()` en vez de quedarse viva para siempre — ya no por un
+bloqueo técnico (el mecanismo ya existe y está verificado), sino porque
+dejar la preemption real encendida por defecto para el resto de la
+sesión de consola es una decisión de política aparte: `task_a`/`task_b`
+(M4a, tampoco terminan nunca) empezarían a imprimir sin parar de fondo
+en cuanto se tomara. Pieza aparte, con esa consecuencia que resolver
+primero (o aceptar).
+
 ---
 
 ## 0. Reconstrucción pendiente (importado desde el histórico de chat)
@@ -346,8 +378,8 @@ zip correspondiente. `process.rs` y fork/execve/exit/getpid (milestone
   arriba
 - ✅ **`preempt.rs`** — preemption real vía timer APIC, separado de M4b
   (milestone `partinfo-ext4-preempt`, segunda mitad) ya reconstruido y
-  verificado — ver arriba. **Sin preemption real en ring 3 todavía**
-  (necesita `TSS.RSP0` por tarea primero, ver limitación documentada)
+  verificado, **incluida preemption real en ring 3** (`TSS.RSP0` por
+  tarea, `preempttest3`) — ver arriba
 - ✅ **`ext2.rs`** — ext2 clásico real de solo lectura, punteros directos
   + indirecto simple (milestone `ext2`) ya reconstruido y verificado —
   ver arriba. **Sin árbol de extents** (eso es ext4, fuera de alcance
@@ -437,9 +469,10 @@ zip correspondiente. `process.rs` y fork/execve/exit/getpid (milestone
   3). Probado con `TEST_ELF_RING3` — payload sin instrucciones
   privilegiadas (`jmp $`, no `hlt`, que provocaría `#GP` en ring 3).
   Comando `ring3test` en la consola, **viaje solo de ida a propósito**:
-  `preempt.rs` ya existe pero todavía sin preemption real en ring 3
-  (ver su limitación documentada), así que sigue sin haber forma de
-  recuperar el control tras saltar — por diseño no se ejecuta en el
+  salta directo con `enter_ring3` sin pasar por `scheduler::spawn`, así
+  que aunque `preempt.rs` ya soporta preemption real en ring 3
+  (`preempttest3`), aquí no hay ninguna tarea registrada a la que
+  volver — por diseño no se ejecuta en el
   arranque automático, solo a demanda
 - ✅ **Syscalls reales — `syscall`/`sysret` (M4g)** *borrador sin
   verificar — la pieza más delicada de toda la sesión, más piezas

@@ -113,6 +113,29 @@ pub fn init() {
     }
 }
 
+/// Cambia `TSS.RSP0` — la pila que la CPU carga automáticamente cuando
+/// una interrupción/excepción interrumpe código en ring 3 y hay que
+/// volver a ring 0. Llamado por `scheduler::yield_now()` al entrarle
+/// el turno a una tarea, con su `Task::kernel_stack_top` — mismo valor
+/// que ya usa `syscall::set_syscall_stack_top`, reutilizado a propósito
+/// (un `syscall` y una interrupción nunca están "en vuelo" a la vez
+/// para la MISMA tarea: mientras corre ring 3 no hay syscall activa, y
+/// mientras se atiende una syscall ya se está en CPL0 — el timer que
+/// interrumpa esa ejecución cae por la rama CPL0 de
+/// `preempt::timer_entry`, que ni mira RSP0).
+///
+/// Antes de esto había un único `RSP0_STACK` global para TODAS las
+/// transiciones ring3→ring0 — inofensivo mientras `preempt.rs` no
+/// tocara el scheduler en ese caso (solo mandaba EOI), pero exactamente
+/// el mismo bug de fondo que ya tuvieron la pila de syscalls compartida
+/// (milestone `wait()`) y la pila de páginas por descubrir: si dos
+/// procesos de ring 3 quedaran "aparcados" a la vez en esa misma pila
+/// física (uno preemptado, el otro corriendo después), el segundo
+/// pisaría el estado guardado del primero.
+pub fn set_rsp0(top: u64) {
+    unsafe { TSS.rsp[0] = top };
+}
+
 /// CS solo se puede recargar con un far jump / far return; DS/ES/SS/FS/GS
 /// con un `mov` normal basta (en long mode determinan poco, pero SS debe
 /// ser válido para que `push`/`pop` no falten).
