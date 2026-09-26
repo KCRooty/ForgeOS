@@ -145,6 +145,13 @@ pub fn yield_now() {
         let next_kstack = sched.tasks[next_idx].kernel_stack_top;
         if next_kstack != 0 {
             crate::syscall::set_syscall_stack_top(next_kstack);
+            // Mismo valor, reutilizado también como TSS.RSP0 — ver la
+            // nota larga en `gdt::set_rsp0` sobre por qué es seguro
+            // compartirlo con la pila de syscalls de la tarea. Sin
+            // esto, `preempt.rs` no podría hacer preemption real en
+            // ring 3 (todas las tareas de usuario compartirían una
+            // única pila física para las transiciones por interrupción).
+            crate::gdt::set_rsp0(next_kstack);
         }
 
         // Igual que CR3 y la pila de syscalls: `current_pid()` debe

@@ -409,11 +409,17 @@ pub const TEST_ELF_FORK_WAIT: [u8; 189] = [
 /// **Limitación conocida, documentada a propósito:** un PID 1 real no
 /// termina nunca — se queda vivo para reapear huérfanos y relanzar
 /// servicios caídos. Este SÍ llama a `exit()` al final de su secuencia
-/// de arranque, porque sin preemption real (`preempt.rs`, todavía
-/// pendiente en el TODO) un bucle infinito en ring 3 monopolizaría la
-/// única CPU cooperativa para siempre y la consola de depuración no
-/// volvería a responder. Cuando `preempt.rs` exista, Ember pasa a
-/// quedarse vivo de verdad tras el arranque — pieza aparte.
+/// de arranque — ya NO por un bloqueo técnico (`preempt.rs` ya existe
+/// y tiene `TSS.RSP0` por tarea, `preempttest3` confirma que un proceso
+/// de ring 3 que nunca ejecuta `syscall` se puede interrumpir e
+/// intercalar con normalidad), sino por una decisión de política
+/// todavía sin tomar: la preemption real está apagada por defecto
+/// (`preempt::ENABLED`, ver su nota) para el resto de la sesión de
+/// consola, precisamente para que `task_a`/`task_b` (que tampoco
+/// terminan nunca) no acaben imprimiendo sin parar de fondo. Dejar a
+/// Ember vivo para siempre exigiría encender la preemption de forma
+/// permanente desde ese punto del arranque — pieza aparte, con esa
+/// consecuencia a resolver primero.
 #[rustfmt::skip]
 pub const TEST_ELF_EMBER: [u8; 293] = [
     0x7F, 0x45, 0x4C, 0x46, 0x02, 0x01, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00,
@@ -557,4 +563,37 @@ pub const TEST_ELF_KILL: [u8; 187] = [
     0xB8, 0x3C, 0x00, 0x00, 0x00, // mov eax, 60  (SYS_EXIT)
     0x0F, 0x05,                   // syscall
     0xEB, 0xFE,                   // jmp $ (no debería llegar aquí)
+];
+
+/// Undécima versión: **nunca ejecuta `syscall`**, ni una sola vez —
+/// `movabs rax, <dirección de la pila de usuario>` seguido de un bucle
+/// infinito `inc qword [rax]` / `jmp`. Antes de `preempt.rs` con
+/// `TSS.RSP0` por tarea, un proceso así habría monopolizado la CPU
+/// para siempre (el scheduler cooperativo solo cambia de tarea cuando
+/// alguien llama a `yield_now()`, y esto nunca lo hace); ahora el timer
+/// lo interrumpe igual que a cualquier tarea de kernel. Escribe en la
+/// dirección de su propia pila de usuario (writable, no ejecutable —
+/// nunca en su propio segmento de código, que es solo R+X, para no
+/// romper W^X ni con un payload de prueba) en vez de reservar BSS
+/// aparte, simplemente porque esa página ya existe y ya es escribible.
+/// Comando `preempttest3` de la consola: lanza esto, activa la
+/// preemption, y confirma por fuera (leyendo la memoria del proceso
+/// vía `mmu::translate`) que el contador avanzó sin que el proceso
+/// haya cedido el turno ni una sola vez por su cuenta.
+#[rustfmt::skip]
+pub const TEST_ELF_SPIN3: [u8; 135] = [
+    0x7F, 0x45, 0x4C, 0x46, 0x02, 0x01, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x02, 0x00, 0x3E, 0x00, 0x01, 0x00, 0x00, 0x00,
+    0x78, 0x00, 0x00, 0x00, 0xA0, 0x00, 0x00, 0x00, 0x40, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x40, 0x00, 0x38, 0x00, 0x01, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x05, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0xA0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xA0, 0x00, 0x00, 0x00,
+    0x87, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x87, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x10, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    // --- código (15 bytes) ---
+    0x48, 0xB8, 0x00, 0x00, 0x00, 0x00, 0x90, 0x00, 0x00, 0x00, // movabs rax, 0x0000009000000000 (pila de usuario, ver launch_elf)
+    0x48, 0xFF, 0x00,             // inc qword [rax]
+    0xEB, 0xFB,                   // jmp -5 (vuelve a "inc qword [rax]")
 ];
