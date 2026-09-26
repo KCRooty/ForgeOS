@@ -118,16 +118,55 @@ extern "x86-interrupt" fn general_protection_fault(frame: InterruptStackFrame, e
     halt();
 }
 
+/// Si el fallo vino de ring 3 (CS.RPL==3 en el frame que dejó el
+/// hardware — mismo offset fijo que usa `preempt::timer_entry`, ver su
+/// nota sobre por qué CS está siempre en la misma posición pase lo que
+/// pase), es un SIGSEGV normal del PROCESO, no del kernel: se le mata a
+/// él (`signal::kill_current`) y se cede el turno a otra tarea, en vez
+/// de colgar el sistema entero como hacía esto antes de `signal.rs`.
+/// Un fallo de página con CS.RPL==0 sigue siendo `halt()` — eso SÍ es
+/// un bug de kernel de verdad, no algo de lo que "recuperarse" matando
+/// un proceso (no hay proceso al que matar).
+///
+/// Alcance de esta pasada: solo `#PF`. `#GP` (ring 3 ejecutando una
+/// instrucción privilegiada, por ejemplo) sigue colgando el kernel
+/// entero — mismo tratamiento pendiente, aparte, para no ampliar el
+/// riesgo de esta pasada más de lo que pide el TODO.
 extern "x86-interrupt" fn page_fault(frame: InterruptStackFrame, error_code: u64) {
     let fault_addr: u64;
     unsafe { core::arch::asm!("mov {}, cr2", out(reg) fault_addr) };
     let rip = frame.instruction_pointer;
+    let from_ring3 = frame.code_segment & 0x3 == 3;
+
     serial_println!(
-        "[EXCEPTION] Page fault en dirección=0x{:x} (error_code={}, rip=0x{:x})",
+        "[EXCEPTION] Page fault en dirección=0x{:x} (error_code={}, rip=0x{:x}, ring3={})",
         fault_addr,
         error_code,
-        rip
+        rip,
+        from_ring3
     );
+
+    if from_ring3 {
+        crate::signal::kill_current(crate::signal::SIGSEGV);
+        // Mismo `sti` que ya hizo falta en `sys_exit()` y en
+        // `preempt::timer_tick_ring0()`, y por el mismo motivo: este
+        // gate de interrupción (`type_attr = 0x8E`) enmascara IF al
+        // entrar, y `yield_now()` puede saltar (vía `switch_to`) a
+        // OTRA tarea que nunca pasó por aquí — sin reactivar IF antes,
+        // esa tarea se reanuda con interrupciones enmascaradas para
+        // siempre, y el `hlt` de `console::read_line()` (que depende
+        // de una interrupción para despertar) se cuelga sin remedio,
+        // aunque la consola siga viva de mentira (ya había impreso el
+        // prompt antes de quedarse ahí).
+        unsafe { core::arch::asm!("sti") };
+        crate::scheduler::yield_now();
+        // No debería volver aquí — la tarea quedó `Finished`. Si de
+        // algún modo lo hace (no debería haber otra tarea elegible,
+        // por ejemplo), mejor pararse en seco que seguir en un estado
+        // que ya no tiene sentido.
+        halt();
+    }
+
     halt();
 }
 
