@@ -609,6 +609,61 @@ convención de pila estándar), `mmap()` de verdad (hoy solo hay `brk()`
 lineal), y sobre todo escribir el sysdeps de mlibc contra ESTA ABI
 concreta — trabajo de otra sesión, mlibc es un proyecto en sí mismo.
 
+**Actualización — M8b: `mmap()`/`munmap()` reales + pila inicial de
+`crt0` (Claude Code, verificado en QEMU):** segunda mitad del paso
+POSIX hacia mlibc, completando lo que M8 dejó pendiente.
+
+- `Pcb.mmap_next` (arena que solo crece, mismo espíritu que
+  `heap_mapped_end`) + `SYS_MMAP`(9)/`SYS_MUNMAP`(11) con numeración
+  real de Linux x86_64 — sin colisión esta vez. `sys_mmap` solo
+  soporta `MAP_ANONYMOUS` (sin fichero detrás — mapear un fichero real
+  no está implementado, devuelve error); ignora el `addr` sugerido por
+  el llamante (siempre decide su propia dirección) y `prot` (todo
+  mapeo anónimo sale RW, nunca ejecutable — no hay ningún caso de uso
+  real todavía que necesite distinguir protecciones aquí). `munmap()`
+  es un no-op a propósito (devuelve 0 sin desmapear nada), mismo
+  espíritu que `brk()` bajando sin desmapear.
+- `process::write_initial_stack_frame` — la pila de un proceso recién
+  arrancado (`spawn_elf` o `execve()`, nunca `fork()`, que reanuda la
+  pila YA EXISTENTE del padre) ahora lleva escrito el frame mínimo que
+  un `crt0` real (convención SysV x86_64) espera encontrar: `argc` en
+  `[rsp]`, `argv[]` terminado en `NULL`, `envp[]` terminado en `NULL`,
+  `auxv[]` terminado en `AT_NULL`. De momento siempre "0 argumentos,
+  sin entorno" — ni `spawn_elf` ni `execve()` aceptan todavía pasar
+  `argv`/`envp` reales (siguiente paso, cuando algún binario los
+  necesite de verdad) — lo que importaba ahora era que la FORMA de la
+  pila ya fuera correcta, no rellenarla de contenido real. Nuevo
+  `process::map_fresh_user_stack` (mapea la página + escribe el frame)
+  es el núcleo compartido entre `spawn_elf` y `sys_execve` — antes cada
+  uno mapeaba su pila por su cuenta con código casi idéntico; de paso,
+  al tocar `sys_execve`, se limpió un warning preexistente de `unsafe`
+  innecesario que llevaba ahí desde M4g.
+- `TEST_ELF_CRT0` (comando `crt0test`), igual que `TEST_ELF_POSIX` de
+  M8: ensamblado con `nasm -f bin` de verdad, no a mano byte a byte.
+  Comprueba que los 5 qwords del frame inicial son EXACTAMENTE cero →
+  `mmap(NULL, 8192, ..., MAP_ANONYMOUS, -1, 0)` para dos páginas de
+  golpe → escribe un patrón de 64 bits DISTINTO en cada página y las
+  relee (si `mmap` solo hubiera mapeado la primera, la escritura en la
+  segunda habría hecho page fault) → `munmap()` + `ping()` del
+  resultado (debe ser 0).
+
+Verificado: `crt0test` funcionó a la primera en QEMU. 6 arranques
+limpios y deterministas en secuencia + batería de regresión completa
+(`crt0test`, `posixtest`, `forktest`, `waittest`, `segvtest`,
+`killtest`, `preempttest`, `preempttest3`, `ext2ls`, `meminfo`, `ps`)
+sin ninguna regresión — `posixtest` sigue funcionando exactamente
+igual, confirmando que compartir `map_fresh_user_stack` con `spawn_elf`
+no le rompió nada. Build limpio, cero warnings nuevos (de hecho uno
+MENOS que el baseline de 34, por la limpieza de `unsafe` mencionada
+arriba).
+
+Con `brk()`+`mmap()`+una pila `crt0`-compatible ya reales y
+verificados, lo que queda para que mlibc en sí sea viable es
+enteramente trabajo de otra sesión: escribir su sysdeps contra esta
+ABI concreta (mlibc es un proyecto en sí mismo, no una tarde), y
+cuando haga falta pasar `argv`/`envp` de verdad, extender `execve()`
+para aceptarlos.
+
 ---
 
 ## 0. Reconstrucción pendiente (importado desde el histórico de chat)
@@ -799,15 +854,17 @@ zip correspondiente. `process.rs` y fork/execve/exit/getpid (milestone
   **privsep** ya documentado en `PHILOSOPHY.md` (proceso sin
   privilegios + supervisor mínimo) para cada demonio real que Ember
   termine lanzando.
-- ✅ **`read()`/`write()`/`open()`/`close()`/`brk()` reales (M8)**
-  *verificado en QEMU* — ver actualización M8 arriba.
-  `SYS_READ`(0)/`SYS_OPEN`(2)/`SYS_CLOSE`(3)/`SYS_BRK`(12) con
-  numeración real de Linux x86_64; `SYS_WRITE`=63 (no pudo ser el 1
-  real, colisión con `SYS_PING` ya existente desde M1). Primer paso
-  POSIX real hacia mlibc (sección 6) — comando `posixtest`.
-  **Pendiente:** `mmap()` de verdad (hoy `brk()` es lo único que
-  existe), `crt0` con convención de pila estándar (`argv`/`envp`), y
-  el sysdeps de mlibc contra esta ABI en sí.
+- ✅ **`read()`/`write()`/`open()`/`close()`/`brk()`/`mmap()`/`munmap()`
+  reales (M8 + M8b)** *verificado en QEMU* — ver actualizaciones M8 y
+  M8b arriba. `SYS_READ`(0)/`SYS_OPEN`(2)/`SYS_CLOSE`(3)/`SYS_MMAP`(9)/
+  `SYS_MUNMAP`(11)/`SYS_BRK`(12) con numeración real de Linux x86_64;
+  `SYS_WRITE`=63 (no pudo ser el 1 real, colisión con `SYS_PING` ya
+  existente desde M1). `mmap()` solo soporta `MAP_ANONYMOUS`;
+  `munmap()` es un no-op a propósito. Primer paso POSIX real hacia
+  mlibc (sección 6) — comandos `posixtest`/`crt0test`. **Pendiente:**
+  el sysdeps de mlibc contra esta ABI en sí, y `argv`/`envp` reales
+  cuando algún binario los necesite (la FORMA de la pila ya es
+  correcta, ver `crt0` en sección 6).
 
 ## 3. Filesystem (M5)
 
@@ -899,15 +956,23 @@ zip correspondiente. `process.rs` y fork/execve/exit/getpid (milestone
 
 ## 6. Userland, toolchain y shell
 
-- ❌ **crt0** — arranque de proceso userland, `argv`/`envp`
+- ✅ **crt0 — pila inicial (M8b)** *verificado en QEMU* — el frame
+  `argc`/`argv`/`envp`/`auxv` que un `_start` real leería ya es
+  correcto (`process::write_initial_stack_frame`), ver actualización
+  M8b arriba. **Pendiente:** que `spawn_elf`/`execve()` acepten
+  `argv`/`envp` de VERDAD (hoy siempre "0 argumentos, sin entorno") —
+  la forma ya está, falta rellenarla cuando algún binario real los
+  necesite.
 - ❌ **libc** — **decisión revisada:** en vez de escribir la nuestra
   desde cero, portar **mlibc** (libc pensada para OSes nuevos, con capa
   de abstracción por sistema; es lo que usa BoredOS). Convierte portar
   software de "meses por programa" a "cambios menores". Ver
-  `COMPATIBILITY.md`. **Base de syscalls ya lista (M8, sección 2):**
-  `read`/`write`/`open`/`close`/`brk` reales y verificados — falta
-  `mmap()`, `crt0`, y escribir el sysdeps de mlibc contra esta ABI en
-  sí (proyecto propio, otra sesión).
+  `COMPATIBILITY.md`. **Base de syscalls ya lista (M8+M8b, sección 2):**
+  `read`/`write`/`open`/`close`/`brk`/`mmap`/`munmap` reales y
+  verificados, más una pila inicial compatible con `crt0` — lo único
+  que falta es escribir el sysdeps de mlibc contra esta ABI en sí
+  (proyecto propio, otra sesión) y, cuando haga falta, `argv`/`envp`
+  reales (ver el punto de `crt0` arriba).
 - ❌ **~50-60 coreutils** — `ls`, `cat`, `cp`, `mv`, `rm`, `ps`, `top`,
   etc. (referencia directa: los coreutils de nyxos-dev)
 - ❌ **Bellows** (el shell real, M4+) — pipelines, redirección, job

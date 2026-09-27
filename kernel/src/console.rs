@@ -79,7 +79,7 @@ fn dispatch(port: &mut SerialPort, line: &str) {
         "help" => {
             let _ = write!(
                 port,
-                "comandos: help, meminfo, caps, bp, panic, fb, pci, ahci, net, ping, disktest, partinfo, ls, cat, write, ext2ls, ext2cat, ring3test, synccalltest, synccalldeny, forktest, waittest, exec, ember, preempttest, preempttest3, segvtest, killtest, posixtest, ps\r\n"
+                "comandos: help, meminfo, caps, bp, panic, fb, pci, ahci, net, ping, disktest, partinfo, ls, cat, write, ext2ls, ext2cat, ring3test, synccalltest, synccalldeny, forktest, waittest, exec, ember, preempttest, preempttest3, segvtest, killtest, posixtest, crt0test, ps\r\n"
             );
         }
         "synccalltest" => {
@@ -201,6 +201,7 @@ fn dispatch(port: &mut SerialPort, line: &str) {
         "segvtest" => run_segv_test(port),
         "killtest" => run_kill_test(port),
         "posixtest" => run_posix_test(port),
+        "crt0test" => run_crt0_test(port),
         "ps" => {
             let _ = write!(port, "PID  PPID  ESTADO\r\n");
             for p in process::list() {
@@ -771,6 +772,26 @@ fn run_posix_test(port: &mut SerialPort) {
             "de vuelta en la consola — revisa arriba: deberías ver 'contenido real via open+write+close \
              sobre el VFS' impreso por EL PROPIO PROCESO (no por el kernel) tras pasar por el VFS de \
              verdad, y un ping con arg0=0xcafebabe confirmando que brk() mapea memoria escribible real.\r\n"
+        );
+    }
+}
+
+/// Pila inicial de `crt0` + `mmap()`/`munmap()` reales — M8b, ver la
+/// nota larga en `elf.rs::TEST_ELF_CRT0`.
+fn run_crt0_test(port: &mut SerialPort) {
+    let _ = write!(port, "arrancando el binario de prueba crt0/mmap...\r\n");
+    caps::set_current(caps::Capabilities::unrestricted());
+    if let Some(pid) = launch_elf(port, &elf::TEST_ELF_CRT0, 0) {
+        let _ = write!(port, "PID {} arrancado — cediendo turno...\r\n", pid);
+        for _ in 0..3 {
+            scheduler::yield_now();
+        }
+        let _ = write!(
+            port,
+            "de vuelta en la consola — revisa arriba: 'pila inicial correcta' confirma que el \
+             frame argc/argv/envp/auxv que ve un crt0 real es el esperado, y 'mmap() de dos \
+             paginas anonimas funciona de verdad' confirma que se mapearon y se pudo escribir \
+             y releer en AMBAS páginas, no solo la primera.\r\n"
         );
     }
 }
