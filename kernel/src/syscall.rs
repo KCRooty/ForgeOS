@@ -78,6 +78,8 @@ pub const SYS_READ: u64 = 0;
 pub const SYS_WRITE: u64 = 63;
 pub const SYS_OPEN: u64 = 2;
 pub const SYS_CLOSE: u64 = 3;
+pub const SYS_MMAP: u64 = 9;
+pub const SYS_MUNMAP: u64 = 11;
 pub const SYS_BRK: u64 = 12;
 pub const SYS_GETPID: u64 = 39;
 pub const SYS_FORK: u64 = 57;
@@ -85,6 +87,11 @@ pub const SYS_EXECVE: u64 = 59;
 pub const SYS_EXIT: u64 = 60;
 pub const SYS_WAIT: u64 = 61; // == wait4 en Linux x86_64; no hay "wait" clásica en esa ABI
 pub const SYS_KILL: u64 = 62;
+
+/// Flag de `mmap()` que de verdad comprobamos — el resto de bits reales
+/// de Linux (`MAP_PRIVATE`, `MAP_FIXED`...) no aplican: solo existe
+/// mapeo anónimo (sin fichero detrás), ver `sys_mmap`.
+pub const MAP_ANONYMOUS: u64 = 0x20;
 
 /// Flag de `open()` para pedir escritura — el resto de bits de Linux
 /// (`O_CREAT`, `O_TRUNC`...) no aplican todavía: `sys_open` siempre
@@ -231,6 +238,8 @@ extern "C" fn syscall_dispatch(frame: *mut SyscallFrame) -> u64 {
         SYS_WRITE => sys_write(frame),
         SYS_OPEN => sys_open(frame),
         SYS_CLOSE => sys_close(frame),
+        SYS_MMAP => sys_mmap(frame),
+        SYS_MUNMAP => 0, // no-op a propósito, ver comentario de `Pcb.mmap_next`
         SYS_BRK => sys_brk(frame),
         SYS_GETPID => process::current_pid(),
         SYS_FORK => {
@@ -632,6 +641,60 @@ fn sys_close(frame: &SyscallFrame) -> u64 {
     result.unwrap_or(u64::MAX)
 }
 
+/// `mmap(addr, length, prot, flags, fd, offset)` — M8b, segunda mitad
+/// de "memoria real para malloc()" (la primera fue `brk()`, M8). Solo
+/// soporta el caso que un `malloc()` de verdad necesita para pedir un
+/// bloque grande directamente: `MAP_ANONYMOUS` (sin fichero detrás) —
+/// mapeo de fichero real (`fd` != -1) devuelve error, no está
+/// implementado. `addr` (la sugerencia de dónde mapear) se ignora
+/// siempre: esta implementación decide su propia dirección
+/// (`Pcb.mmap_next`, arena que solo crece — ver su comentario) en vez
+/// de intentar honrar un `addr` de usuario, igual de válido según el
+/// contrato POSIX (`MAP_FIXED` sería el único caso que de verdad
+/// exigiría respetarlo, y no lo soportamos). `prot` también se ignora
+/// — todo mapeo anónimo sale legible+escribible, nunca ejecutable; no
+/// hay ahora mismo ningún caso de uso real (código cargado dinámico)
+/// que necesite distinguir protecciones aquí.
+fn sys_mmap(frame: &SyscallFrame) -> u64 {
+    if let Err(v) = caps::enforce_current(caps::CAP_MEM_MAP) {
+        serial_println!("[syscall] SYS_MMAP DENEGADO — falta CAP_MEM_MAP (pedido=0x{:x})", v.requested);
+        return u64::MAX;
+    }
+
+    let length = frame.arg1;
+    let flags = frame.arg3;
+    if length == 0 {
+        return u64::MAX;
+    }
+    if flags & MAP_ANONYMOUS == 0 {
+        serial_println!("[syscall] mmap: solo se soporta MAP_ANONYMOUS (sin fichero detrás)");
+        return u64::MAX;
+    }
+
+    let pid = process::current_pid();
+    let Some(pcb) = process::find(pid) else {
+        return u64::MAX;
+    };
+
+    let num_pages = (length + 0xFFF) / 0x1000;
+    let start = pcb.mmap_next;
+    let mut page = start;
+    for _ in 0..num_pages {
+        let Some(phys) = pmm::alloc_frame() else {
+            serial_println!("[syscall] mmap: sin memoria física");
+            return u64::MAX;
+        };
+        if let Err(e) = unsafe { mmu::map_page_in(pcb.page_table, page, phys, true, false) } {
+            serial_println!("[syscall] mmap: fallo mapeando 0x{:x}: {}", page, e);
+            return u64::MAX;
+        }
+        page += 0x1000;
+    }
+
+    process::with_pid_mut(pid, |p| p.mmap_next = page);
+    start
+}
+
 /// `brk(addr)` — `addr=0` consulta el límite actual sin cambiar nada
 /// (convención estándar de `brk()`). Solo crece de verdad mapeando
 /// páginas nuevas cuando `addr` supera lo que YA está mapeado
@@ -712,13 +775,6 @@ fn sys_execve(frame: &SyscallFrame) -> u64 {
         }
     };
 
-    let stack_phys = match unsafe { crate::pmm::alloc_frame() } {
-        Some(f) => f,
-        None => {
-            serial_println!("[syscall] execve: sin memoria física para la pila de usuario");
-            return u64::MAX;
-        }
-    };
     // 768 GiB, índice P4 = 1 — genuinamente privado del nuevo espacio.
     // Antes vivía en 448 GiB (P4 = 0, POR DEBAJO del límite de 512 GiB
     // documentado en elf.rs): parecía funcionar porque hasta ahora
@@ -728,11 +784,18 @@ fn sys_execve(frame: &SyscallFrame) -> u64 {
     // kernel (`free_address_space` nunca toca P4[0], a propósito), y la
     // segunda llamada chocaba contra esa misma dirección ya ocupada.
     let user_stack_virt: u64 = 0x0000_00C0_0000_0000;
-    if let Err(e) = unsafe { mmu::map_page_in(loaded.page_table, user_stack_virt, stack_phys, true, false) } {
-        serial_println!("[syscall] execve: fallo mapeando la pila de usuario: {}", e);
-        return u64::MAX;
-    }
-    let user_stack_top = user_stack_virt + 4096;
+    // `map_fresh_user_stack` (M8b) también deja escrito el frame
+    // inicial que un `crt0` real esperaría (`argc`/`argv`/`envp`/
+    // `auxv`, ver su comentario en `process.rs`) — antes esta función
+    // mapeaba la página a mano y usaba `user_stack_virt + 4096` tal
+    // cual como RSP; ahora comparte el mismo camino que `spawn_elf`.
+    let user_stack_top = match unsafe { process::map_fresh_user_stack(loaded.page_table, user_stack_virt) } {
+        Ok(top) => top,
+        Err(e) => {
+            serial_println!("[syscall] execve: fallo mapeando la pila de usuario: {}", e);
+            return u64::MAX;
+        }
+    };
 
     let pid = process::current_pid();
     process::set_page_table(pid, loaded.page_table);
