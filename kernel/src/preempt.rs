@@ -77,7 +77,7 @@
 //! RFLAGS completo desde el frame que empujó el hardware al entrar.
 
 use core::arch::naked_asm;
-use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
 /// El timer de M4b (`apic.rs`) lleva armado y disparando desde el
 /// primer arranque — antes de este fichero, su handler solo contaba
@@ -86,24 +86,45 @@ use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 /// syscalls, `console::run()`...) sin que ningún milestone posterior
 /// lo tuviera en cuenta, la preemption de verdad se queda detrás de
 /// esta puerta, apagada por defecto — `timer_tick` sigue contando
-/// ticks y mandando EOI siempre, pero solo llama a `yield_now()` si
-/// esto está a `true`. `preempttest`/`preempttest3` (comandos de
-/// consola) la encienden de forma ACOTADA (la vuelven a apagar al
-/// terminar su propia ventana de prueba); `ember` la enciende y la
-/// deja encendida PARA SIEMPRE, porque Ember ya no termina (necesita
-/// preemption real para siempre, no solo durante su arranque).
+/// ticks y mandando EOI siempre, pero solo llama a `yield_now()` si el
+/// contador de abajo es mayor que cero. `preempttest`/`preempttest3`
+/// (comandos de consola) la encienden de forma ACOTADA (la vuelven a
+/// apagar al terminar su propia ventana de prueba); `ember` la enciende
+/// y la deja encendida PARA SIEMPRE, porque Ember ya no termina
+/// (necesita preemption real para siempre, no solo durante su
+/// arranque).
 ///
-/// Interacción a tener en cuenta, no un bug: un único flag global, no
-/// contador de referencias — si `ember` ya la dejó encendida para
-/// siempre y DESPUÉS se ejecuta `preempttest`/`preempttest3`, su propio
-/// apagado al final de la ventana también apaga la de Ember (que se
-/// queda entonces parada para siempre en `Running`, sin avanzar más,
-/// pero sin colgar nada ni corromper memoria — simplemente deja de
-/// recibir turno). `preempt::set_enabled(true)` a mano lo restaura.
-static ENABLED: AtomicBool = AtomicBool::new(false);
+/// Contador de referencias, no un único flag booleano — versión
+/// anterior de este fichero: si `ember` ya la había dejado encendida
+/// para siempre y DESPUÉS se ejecutaba `preempttest`/`preempttest3`, el
+/// apagado de la prueba al final de su ventana apagaba también la de
+/// Ember (que se quedaba parada para siempre en `Running`, sin avanzar
+/// más — sin colgar nada ni corromper memoria, pero sin progresar).
+/// Con contador, cada `set_enabled(true)` suma uno y cada
+/// `set_enabled(false)` resta uno (saturando en 0, nunca bajo cero) —
+/// la preemption solo se apaga de verdad cuando nadie más la pidió. Los
+/// cuatro sitios que llaman a esto (`ember`, `preempttest`,
+/// `preempttest3`, el arranque automático de `main.rs`) siempre hacen
+/// como mucho un `true` seguido como mucho de un `false`, nunca dos
+/// `true` seguidos del mismo llamante — así que no hace falta guardar
+/// "cuántos true propios llevo" en cada sitio, el contador global ya
+/// lleva la cuenta bien.
+static ENABLED: AtomicU32 = AtomicU32::new(0);
 
 pub fn set_enabled(enabled: bool) {
-    ENABLED.store(enabled, Ordering::Relaxed);
+    if enabled {
+        ENABLED.fetch_add(1, Ordering::Relaxed);
+    } else {
+        // `fetch_update` en vez de `fetch_sub` a pelo: satura en 0 en
+        // vez de underflow-wrap si alguna vez se llama a `false` de más
+        // (no debería pasar con los call sites actuales, pero un
+        // contador de referencias que puede quedarse atascado en
+        // `u32::MAX` por un desequilibrio es peor que uno que se queda
+        // en 0 de más).
+        let _ = ENABLED.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |v| {
+            Some(v.saturating_sub(1))
+        });
+    }
 }
 
 /// Trampolín de entrada para `apic::TIMER_VECTOR` — sustituye al
@@ -130,14 +151,15 @@ pub unsafe extern "C" fn timer_entry() {
 }
 
 /// Cuenta el tick y manda EOI siempre; cede el turno de verdad solo si
-/// `set_enabled(true)` (ver nota de cabecera sobre `ENABLED`) — el
-/// scheduler decide entonces si hay otra tarea `Ready` a la que saltar,
-/// sin importar si interrumpió una tarea de kernel o un proceso de
-/// ring 3 (ver "Un solo camino para CPL0 y CPL3" en la cabecera).
+/// `ENABLED` > 0 (ver nota de cabecera sobre el contador de
+/// referencias) — el scheduler decide entonces si hay otra tarea
+/// `Ready` a la que saltar, sin importar si interrumpió una tarea de
+/// kernel o un proceso de ring 3 (ver "Un solo camino para CPL0 y
+/// CPL3" en la cabecera).
 extern "C" fn timer_tick() {
     crate::apic::note_tick();
     unsafe { crate::apic::send_eoi() };
-    if !ENABLED.load(Ordering::Relaxed) {
+    if ENABLED.load(Ordering::Relaxed) == 0 {
         return;
     }
     // El `sti` reactiva IF antes de ceder el turno — ver la nota larga
