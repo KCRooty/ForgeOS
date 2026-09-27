@@ -495,6 +495,58 @@ regresión completa después de cada uno (`forktest`, `waittest`,
 `segvtest`, `killtest`, `preempttest`, `preempttest3`, `ext2ls`,
 `meminfo`, `ps`) sin ninguna regresión.
 
+**Actualización — segundo bug real, introducido por el propio fix
+anterior (Claude Code, verificado en QEMU): `IrqGuard` dejaba
+`preempttest` colgado PARA SIEMPRE.** No es el mismo bug que el de
+arriba (ese era `execve`/CR3, ya arreglado) — este lo introdujo el
+propio `scheduler::IrqGuard` de ese mismo fix, y es más grave: no
+corrupción puntual, sino bloqueo TOTAL Y PERMANENTE de todo el sistema
+(sin pánico, sin error, simplemente sin más salida por serie nunca
+más). Reproducido de inmediato al terminar de verificar el fix
+anterior: `preempttest`, ejecutado desde la consola después del
+arranque automático de Ember, se quedaba colgado siempre, de forma
+100% reproducible (no intermitente como el bug de `execve`).
+
+Causa: el `sti` de restauración de `IrqGuard` vive en su `Drop`, en la
+pila de QUIEN LLAMÓ a `yield_now()` — pensado para dispararse cuando
+esa misma llamada "vuelve". Pero para una tarea que arranca por
+primera vez, `task::switch_to` salta DIRECTAMENTE a su `entry` sin
+volver nunca a esa pila — ese `Drop` nunca se ejecuta para ella. Todo
+proceso real (vía `enter_ring3`/`enter_ring3_with_rax`) se salva solo
+porque su propio `iretq`, unas instrucciones más tarde, restaura
+RFLAGS entero de todas formas (IF=1 a mano, sin importar lo que hubiera
+antes) — por eso nunca se notó en `ember`, `forktest`, `waittest`,
+`segvtest` ni `killtest`. Pero `preempt::spin_a`/`spin_b`
+(`preempttest`) son hilos de kernel puro, `fn() -> !`, que nunca hacen
+`syscall` ni `iretq` ni vuelven a ceder el turno — la primera vez que
+les toca turno, IF se queda enmascarado PARA SIEMPRE. Y con IF=0 el
+timer de la APIC no puede volver a disparar NUNCA — nada vuelve a
+interrumpir a `spin_a`/`spin_b` jamás, así que nada más en todo el
+sistema vuelve a ejecutarse tampoco: el "cuelgue" no es una tarea
+atascada, es la CPU entera parada para siempre dentro del bucle
+`COUNT.fetch_add(1)` de `spin_a`.
+
+Arreglado añadiendo `sti` al final de `task::switch_to`, justo antes
+del `ret` — el ÚNICO punto de tránsito por el que pasa CUALQUIER
+cambio de tarea, nueva o reanudada, así que no depende de que la tarea
+entrante vuelva a pasar por ningún sitio en concreto. No reabre la
+carrera que `IrqGuard` cerraba: para cuando se ejecuta ese `sti`, el
+contexto de la tarea entrante ya está cargado del todo (los 6
+registros callee-saved + `rsp`), así que un timer que dispare justo
+ahí solo significa que a la tarea recién entrada le vuelven a quitar
+el turno enseguida — no hay nada a medio guardar que se pueda
+corromper.
+
+Verificado: `preempttest` (antes colgado al 100% de las veces tras el
+arranque de Ember) ahora completa siempre, con `preempttest3`
+inmediatamente después en la misma sesión también limpio. Batería de
+regresión completa repetida entera (`forktest`, `waittest`, `segvtest`,
+`killtest`, `preempttest`, `preempttest3`, `ext2ls`, `meminfo`, `ps`)
+sin ninguna regresión, más 18 arranques adicionales desde cero (10 +
+3 en aislado tras descartar contención de recursos por un test en
+paralelo, + 5 de la propia batería) sin ningún fallo del bug de
+`execve`/CR3 tampoco — los dos arreglos son compatibles entre sí.
+
 ---
 
 ## 0. Reconstrucción pendiente (importado desde el histórico de chat)

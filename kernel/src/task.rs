@@ -174,6 +174,32 @@ impl Task {
 /// `switch_to` la última vez que esa tarea cedió el turno — técnica
 /// estándar de corutinas/hilos cooperativos (misma idea que usan
 /// ucontext o boost::context).
+///
+/// `sti` justo antes del `ret` final — BUG real encontrado verificando
+/// `preempttest` después de añadir `scheduler::IrqGuard` (que hace
+/// `cli` al entrar en `yield_now()` y `sti` al salir, protegiendo la
+/// sección crítica del cambio de contexto frente al timer). Ese `sti`
+/// vive en el `Drop` del guard, en la pila de QUIEN LLAMÓ a
+/// `switch_to` — y para una tarea que arranca por primera vez (`spin_a`/
+/// `spin_b`, hilos de kernel puro `fn() -> !` que nunca hacen `syscall`
+/// ni `iretq`, a diferencia de cualquier proceso real vía
+/// `enter_ring3`), el `ret` de aquí salta DIRECTAMENTE a su `entry` —
+/// nunca vuelve a la pila de quien llamó, así que ese `Drop` JAMÁS se
+/// ejecuta. Como `spin_a`/`spin_b` tampoco vuelven a ceder el turno
+/// nunca (bucle infinito sin llamar a `yield_now()`), IF se queda
+/// enmascarado PARA SIEMPRE en cuanto les toca turno por primera vez —
+/// y como con IF=0 el timer no puede volver a disparar NUNCA, nada
+/// vuelve a interrumpirlos jamás: bloqueo total y permanente del
+/// sistema entero (reproducido en QEMU: `preempttest` tras el arranque
+/// de Ember se quedaba colgado para siempre, sin pánico ni error,
+/// simplemente sin más salida por serie). Poniendo el `sti` aquí, en el
+/// ÚNICO punto de tránsito por el que pasa CUALQUIER cambio de tarea
+/// (arranque nuevo o reanudación), queda arreglado de forma uniforme
+/// sin depender de que la tarea entrante vuelva a pasar por ningún sitio
+/// en concreto — y no reabre la carrera original: para entonces el
+/// contexto ya está cargado del todo (registros + `rsp`), así que un
+/// timer que dispare justo aquí solo significa que a la tarea recién
+/// entrada le vuelven a quitar el turno enseguida, no corrupción.
 #[unsafe(naked)]
 pub unsafe extern "C" fn switch_to(old: *mut Context, new: *const Context) {
     naked_asm!(
@@ -191,6 +217,7 @@ pub unsafe extern "C" fn switch_to(old: *mut Context, new: *const Context) {
         "mov r14, [rsi + 32]",
         "mov r15, [rsi + 40]",
         "mov rsp, [rsi + 48]",
+        "sti",
         "ret",
     );
 }
