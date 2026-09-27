@@ -339,30 +339,12 @@ fn run_synccall_elf(port: &mut SerialPort) {
 /// siempre. `parent_pid` = 0 para "sin padre" (lanzado directamente
 /// desde la consola, no por `fork()`).
 fn launch_elf(port: &mut SerialPort, bytes: &[u8], parent_pid: u64) -> Option<u64> {
-    let loaded = match elf::load(bytes) {
-        Ok(l) => l,
+    match unsafe { process::spawn_elf(bytes, parent_pid) } {
+        Ok(pid) => Some(pid),
         Err(e) => {
             let _ = write!(port, "carga del ELF falló: {}\r\n", e);
-            return None;
+            None
         }
-    };
-
-    unsafe {
-        let stack_phys = match pmm::alloc_frame() {
-            Some(f) => f,
-            None => {
-                let _ = write!(port, "sin memoria para la pila de usuario\r\n");
-                return None;
-            }
-        };
-        let user_stack_virt: u64 = 0x0000_0090_0000_0000; // 576 GiB, privado del proceso
-        if let Err(e) = mmu::map_page_in(loaded.page_table, user_stack_virt, stack_phys, true, false) {
-            let _ = write!(port, "fallo mapeando la pila de usuario: {}\r\n", e);
-            return None;
-        }
-        let user_stack_top = user_stack_virt + 4096;
-
-        Some(process::spawn_process(loaded.entry_point, user_stack_top, loaded.page_table, parent_pid))
     }
 }
 
@@ -477,12 +459,12 @@ fn run_ping(port: &mut SerialPort) {
     }
 }
 
-/// Primera prueba real de Ember (PID 1, modelo rc.d): registra dos
-/// "servicios" en el VFS (reutilizando `TEST_ELF_PING_EXIT` — un
-/// binario que ya sabemos que arranca y termina limpio, aquí hace de
-/// placeholder de un servicio real) y arranca `TEST_ELF_EMBER`, que los
-/// lanza en orden, esperando a que cada uno termine del todo antes del
-/// siguiente.
+/// Relanza Ember (modelo rc.d) a demanda — `main.rs` ya arranca UNA
+/// instancia automáticamente en el propio arranque (PID 1 de verdad,
+/// antes de "Boot completo"); este comando registra los mismos dos
+/// "servicios" placeholder (`TEST_ELF_PING_EXIT`) y lanza una segunda
+/// instancia con un PID distinto — útil para probar el mecanismo aparte
+/// sin tener que reiniciar la VM entera.
 fn run_ember(port: &mut SerialPort) {
     let _ = write!(port, "registrando servicios en el VFS: ember-svc0, ember-svc1...\r\n");
     vfs::write("ember-svc0", &elf::TEST_ELF_PING_EXIT);

@@ -397,6 +397,35 @@ se queda entonces parada para siempre en `running` sin avanzar más
 (inofensivo: no cuelga nada ni corrompe memoria, simplemente deja de
 recibir turno). `preempt::set_enabled(true)` a mano lo restaura.
 
+**Actualización — Ember arranca automáticamente (Claude Code,
+verificado en QEMU):** hasta ahora Ember solo arrancaba a demanda desde
+el comando `ember` de la consola — un "PID 1" que hacía falta pedir a
+mano no es un init real. `main.rs` ahora la arranca ella sola, justo
+después de `syscall::init()` (necesita VFS y syscalls ya listos) y
+antes del mensaje "Boot completo": registra los dos servicios
+placeholder, lanza `TEST_ELF_EMBER`, enciende la preemption real de
+forma permanente (mismo orden crítico que ya exigía `run_ember` —
+antes de ceder el turno, nunca después) y cede unos yields para dejarla
+completar sus dos rondas antes de seguir arrancando. El comando `ember`
+de la consola sigue existiendo, ahora para lanzar una segunda instancia
+de prueba aparte (con otro PID) sin reiniciar la VM entera.
+
+De paso, `console::launch_elf` (cargar ELF + montar pila de usuario +
+`process::spawn_process`) se extrajo a `process::spawn_elf` — antes
+solo vivía en `console.rs`, y el arranque automático necesitaba
+exactamente lo mismo sin tener un `SerialPort` al que escribir. Un solo
+núcleo compartido en vez de dos copias que podrían divergir; verificado
+que los comandos que ya usaban `launch_elf` (`forktest`, `waittest`,
+`exec`, `segvtest`, `killtest`, `ember`, `preempttest3`) siguen
+funcionando exactamente igual.
+
+Verificado con una sesión completa desde cero: el log de arranque
+ahora muestra a Ember completando sus dos rondas ANTES de "Boot
+completo", y una batería larga después (`forktest`, `ps`, `segvtest`,
+`ps`, `killtest`, `ps`, `ext2ls`, `meminfo`) confirma que Ember sigue
+`running` de fondo en todo momento sin que nada más se rompa, ahora con
+la preemption real activa desde el primer instante en que hay consola.
+
 ---
 
 ## 0. Reconstrucción pendiente (importado desde el histórico de chat)
@@ -574,12 +603,16 @@ zip correspondiente. `process.rs` y fork/execve/exit/getpid (milestone
 - ❌ **Memoria compartida (SHM)** — necesaria más adelante para el
   compositor gráfico (ventanas cliente)
 - ✅ **Ember** *verificado en QEMU* — modelo rc.d de FreeBSD
-  (secuencial, no systemd), comando `ember` de la consola. **Ya se
-  queda viva para siempre** (PID 1 real, `jmp $` infinito + preemption
-  real permanente desde que arranca) — ver actualización arriba.
-  **Pendiente:** arrancado automáticamente por el kernel (hoy solo a
-  demanda desde la consola, con PPID 0 igual que un test más), lista de
-  servicios real en vez de dos placeholders hardcodeados, y el patrón
+  (secuencial, no systemd). **Ya se queda viva para siempre** (PID 1
+  real, `jmp $` infinito + preemption real permanente desde que
+  arranca) — ver actualización arriba. **Ya arranca automáticamente
+  desde `main.rs`**, antes de "Boot completo" — ya no hace falta
+  pedirlo a mano (el comando `ember` de la consola sigue existiendo,
+  para relanzar una segunda instancia de prueba aparte, con otro PID).
+  `process::spawn_elf` (nuevo) es el núcleo compartido entre ese
+  arranque automático y `console::launch_elf` — antes duplicado.
+  **Pendiente:** lista de servicios real en vez de dos placeholders
+  hardcodeados, y el patrón
   **privsep** ya documentado en `PHILOSOPHY.md` (proceso sin
   privilegios + supervisor mínimo) para cada demonio real que Ember
   termine lanzando.
