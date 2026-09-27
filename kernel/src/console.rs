@@ -79,7 +79,7 @@ fn dispatch(port: &mut SerialPort, line: &str) {
         "help" => {
             let _ = write!(
                 port,
-                "comandos: help, meminfo, caps, bp, panic, fb, pci, ahci, net, ping, disktest, partinfo, ls, cat, write, ext2ls, ext2cat, ring3test, synccalltest, synccalldeny, forktest, waittest, exec, ember, preempttest, preempttest3, segvtest, killtest, ps\r\n"
+                "comandos: help, meminfo, caps, bp, panic, fb, pci, ahci, net, ping, disktest, partinfo, ls, cat, write, ext2ls, ext2cat, ring3test, synccalltest, synccalldeny, forktest, waittest, exec, ember, preempttest, preempttest3, segvtest, killtest, posixtest, ps\r\n"
             );
         }
         "synccalltest" => {
@@ -200,6 +200,7 @@ fn dispatch(port: &mut SerialPort, line: &str) {
         "preempttest3" => run_preempt_test3(port),
         "segvtest" => run_segv_test(port),
         "killtest" => run_kill_test(port),
+        "posixtest" => run_posix_test(port),
         "ps" => {
             let _ = write!(port, "PID  PPID  ESTADO\r\n");
             for p in process::list() {
@@ -748,6 +749,28 @@ fn run_kill_test(port: &mut SerialPort) {
         let _ = write!(
             port,
             "de vuelta en la consola — 'ps' no deberia listar ya al hijo (kill()+wait() lo reapeo).\r\n"
+        );
+    }
+}
+
+/// `read()`/`write()`/`open()`/`close()`/`brk()` reales — M8, ver la
+/// nota larga en `elf.rs::TEST_ELF_POSIX`. Cede bastantes más turnos
+/// que otros tests: el binario hace 8 syscalls encadenadas más las dos
+/// líneas de `write(1,...)` que imprime él mismo, cada una con su
+/// propio viaje ring3→syscall→ring3.
+fn run_posix_test(port: &mut SerialPort) {
+    let _ = write!(port, "arrancando el binario de prueba POSIX (write/open/read/close/brk reales)...\r\n");
+    caps::set_current(caps::Capabilities::unrestricted());
+    if let Some(pid) = launch_elf(port, &elf::TEST_ELF_POSIX, 0) {
+        let _ = write!(port, "PID {} arrancado — cediendo turno...\r\n", pid);
+        for _ in 0..3 {
+            scheduler::yield_now();
+        }
+        let _ = write!(
+            port,
+            "de vuelta en la consola — revisa arriba: deberías ver 'contenido real via open+write+close \
+             sobre el VFS' impreso por EL PROPIO PROCESO (no por el kernel) tras pasar por el VFS de \
+             verdad, y un ping con arg0=0xcafebabe confirmando que brk() mapea memoria escribible real.\r\n"
         );
     }
 }
