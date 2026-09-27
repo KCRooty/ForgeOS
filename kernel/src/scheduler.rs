@@ -12,30 +12,42 @@ use core::cell::UnsafeCell;
 /// Deshabilita IF al crearse, la restaura a lo que fuera ANTES (no
 /// siempre a 1) al soltarse — RAII para que `yield_now()` pueda usar
 /// `return` anticipado sin duplicar la restauración en cada punto de
-/// salida. Bug real encontrado verificando el arranque automático de
-/// Ember con preemption real (milestone "Ember arranca automáticamente
-/// + preemption real permanente"): `yield_now()`/`switch_to` nunca
-/// deshabilitaban IF durante su sección crítica — mientras la
-/// preemption estuvo apagada por defecto (todo el resto de la sesión
-/// hasta este punto) eso daba igual, porque nada disparaba el timer en
-/// medio de un `yield_now()` llamado con IF=1. Pero `ember` deja la
-/// preemption encendida PARA SIEMPRE desde el primer instante en que
-/// arranca, y el propio arranque automático de `main.rs` cede el turno
-/// varias veces con IF=1 (código de kernel normal, no dentro de una
-/// syscall enmascarada) — si el timer dispara justo ahí, su propio
-/// `timer_tick` vuelve a llamar a `yield_now()` DE FORMA REENTRANTE
-/// sobre el mismo `SCHEDULER` global que la llamada externa todavía
-/// está mutando (`sched.current`, CR3, `TSS.RSP0`, `CURRENT_PID`, y
-/// sobre todo los registros a medio guardar/restaurar de
-/// `task::switch_to`, que tampoco es atómico). Confirmado con arranques
-/// repetidos en QEMU: en boots "malos" (~1 de cada 2-3), Ember (PID 1)
-/// terminaba ejecutando literalmente el código de OTRO proceso (fork
-/// espurio, page fault espurio) porque el cambio de contexto se
-/// solapaba con una reentrada del timer a medio camino. Con IF
-/// deshabilitado durante toda la decisión de scheduling + el cambio de
-/// contexto, y restaurado solo una vez que `switch_to` ya volvió (esta
-/// misma tarea, ya a salvo), el timer no puede volver a entrar hasta
-/// que el cambio de contexto haya terminado de verdad.
+/// salida.
+///
+/// Endurecimiento defensivo, no el arreglo del bug real de corrupción
+/// del arranque de Ember (ese era `sys_execve` sin sincronizar
+/// `scheduler::Task.page_table` — ver `set_task_page_table` más abajo y
+/// `docs/TODO.md`). Pero mientras `yield_now()`/`switch_to` no
+/// deshabilitaran IF durante su sección crítica, con la preemption real
+/// de `ember` encendida para siempre desde el primer instante, el timer
+/// SÍ podía reentrar en `yield_now()` en medio de su propia decisión de
+/// scheduling (`sched.current`, CR3, `TSS.RSP0`, `CURRENT_PID`) y sobre
+/// todo en medio de los registros a medio guardar/restaurar de
+/// `task::switch_to` — con preemption apagada por defecto (todo el
+/// resto de la sesión hasta este punto) eso nunca importó, porque nada
+/// disparaba el timer ahí. Con IF deshabilitado durante toda la
+/// decisión de scheduling + el cambio de contexto, el timer no puede
+/// volver a entrar hasta que el cambio de contexto haya terminado de
+/// verdad — cierra una clase de corrupción real, aunque no fuera la
+/// causa de lo que se veía en Ember.
+///
+/// IMPORTANTE: el `sti` de restauración vive en el `Drop`, en la pila
+/// de QUIEN LLAMÓ a `yield_now()` — para una tarea que arranca por
+/// primera vez, `switch_to` salta DIRECTAMENTE a su `entry`, sin volver
+/// nunca a esa pila, así que este `Drop` nunca se ejecuta para ella. Si
+/// esa tarea nueva es un hilo de kernel puro que nunca hace `syscall`/
+/// `iretq` ni vuelve a cadedr el turno (`preempt::spin_a`/`spin_b`), IF
+/// se quedaría enmascarado PARA SIEMPRE la primera vez que le tocara
+/// turno — bloqueo total del sistema, ya que con IF=0 el timer no
+/// puede volver a disparar nunca. Por eso `task::switch_to` tiene AHORA
+/// su propio `sti` justo antes del `ret` final — el único punto de
+/// tránsito por el que pasa CUALQUIER cambio de tarea, nueva o
+/// reanudada — y este guard, en la práctica, solo importa de verdad
+/// para los `return` tempranos de `yield_now()` que NUNCA llegan a
+/// llamar a `switch_to` (nadie más a quien cederle el turno). Ver el
+/// comentario largo en `task::switch_to` sobre el bug real que eso
+/// arregló (reproducido en QEMU: `preempttest` se colgaba para siempre
+/// tras el arranque de Ember).
 struct IrqGuard {
     was_enabled: bool,
 }
