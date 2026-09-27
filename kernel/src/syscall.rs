@@ -472,6 +472,11 @@ fn sys_execve(frame: &SyscallFrame) -> u64 {
 
     let pid = process::current_pid();
     process::set_page_table(pid, loaded.page_table);
+    // También en el scheduler, no solo en el PCB — ver el comentario
+    // largo de `scheduler::set_task_page_table` sobre el bug real que
+    // esto arregla (CR3 revertido al espacio VIEJO si el timer preempta
+    // a este proceso en cualquier punto después de este `execve`).
+    scheduler::set_task_page_table(pid, loaded.page_table);
 
     serial_println!(
         "[syscall] execve: PID {} -> '{}' cargado, entry=0x{:x} (espacio de direcciones reemplazado)",

@@ -12,7 +12,7 @@ Ver [docs/PHILOSOPHY.md](docs/PHILOSOPHY.md) (diseño técnico) y
 [docs/PRODUCT.md](docs/PRODUCT.md) (a quién sirve y por qué) para el
 razonamiento completo detrás de cada decisión.
 
-## Estado: red (`ping`), Ember (PID 1 real, arranca solo en el boot y no termina nunca), ext2 de solo lectura, escáner GPT/MBR (`partinfo`), preemption real en kernel y en ring 3 (`preempttest`/`preempttest3`) y señales SIGKILL/SIGTERM/SIGSEGV (`segvtest`, `killtest`) — todo verificado en QEMU. Con esto, el TODO original de la reconstrucción está completo.
+## Estado: red (`ping`), Ember (PID 1 real, arranca solo en el boot y no termina nunca), ext2 de solo lectura, escáner GPT/MBR (`partinfo`), preemption real en kernel y en ring 3 (`preempttest`/`preempttest3`) y señales SIGKILL/SIGTERM/SIGSEGV (`segvtest`, `killtest`) — todo verificado en QEMU con 15+ arranques repetidos desde cero, tras arreglar una corrupción intermitente real que solo salía a la luz repitiendo el arranque (`execve()` no sincronizaba la tabla de páginas nueva con la copia que usa el scheduler — ver `docs/TODO.md`). Con esto, el TODO original de la reconstrucción está completo.
 
 ## Referencias de arquitectura estudiadas
 - Asmodeus14/Nyx (Rust, QCLang, motor 3D Gen9.5 hand-rolled)
