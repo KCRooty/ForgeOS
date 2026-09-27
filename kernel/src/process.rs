@@ -8,6 +8,7 @@
 //! una tarea corriendo de verdad a la vez (cooperativo, sin SMP), igual
 //! que el resto de M4.
 
+use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
 
@@ -23,13 +24,58 @@ pub enum ProcessState {
     Zombie(i32),
 }
 
-#[derive(Clone, Copy)]
+/// Una entrada de la tabla de descriptores de fichero de un proceso —
+/// M8, primer paso hacia POSIX real para mlibc. El VFS (`vfs.rs`) no
+/// tiene "handles" de verdad, solo `read()`/`write()` de buffer
+/// completo — así que un fd real se implementa cargando/acumulando el
+/// contenido en memoria aquí, no delegando en el VFS por cada
+/// `SYS_READ`/`SYS_WRITE`.
+#[derive(Clone)]
+pub enum FdEntry {
+    /// Abierto para lectura: contenido íntegro cargado del VFS al
+    /// abrir, con cursor de lectura — `SYS_READ` sirve trozos de aquí,
+    /// nunca vuelve a tocar el VFS.
+    ReadFile { data: Vec<u8>, cursor: usize },
+    /// Abierto para escritura: buffer en memoria que `SYS_WRITE` va
+    /// llenando; se vuelca de verdad al VFS (`vfs::write`) en
+    /// `SYS_CLOSE` — no hay escritura incremental real al VFS todavía,
+    /// pero es suficiente para que un primer `fopen()`/`fwrite()` de
+    /// libc funcione de principio a fin.
+    WriteFile { name: String, data: Vec<u8> },
+}
+
+/// Dirección virtual base del heap de cada proceso — 704 GiB, índice
+/// P4 = 1 (privado, igual razonamiento que el código/pila en
+/// `elf.rs`/`process.rs::spawn_elf`), clara de la pila (0x90...), el
+/// código (0xA0...) y la pila temporal de `execve` (0xC0...).
+pub const HEAP_BASE: u64 = 0x0000_00B0_0000_0000;
+
+#[derive(Clone)]
 pub struct Pcb {
     pub pid: u64,
     pub parent_pid: u64,
     /// PML4 físico del espacio de direcciones de este proceso.
     pub page_table: u64,
     pub state: ProcessState,
+    /// Índice = fd - 3 (0/1/2 son stdin/stdout/stderr, siempre servidos
+    /// por el puerto serie — ver `syscall::sys_read`/`sys_write` — y
+    /// nunca ocupan un slot aquí). `None` = fd cerrado, hueco
+    /// reutilizable por el siguiente `open()`.
+    pub fds: Vec<Option<FdEntry>>,
+    /// `brk()` — el límite LÓGICO actual, el que ve el proceso (puede
+    /// bajar sin problema, `SYS_BRK` nunca desmapea).
+    pub heap_top: u64,
+    /// Hasta dónde hay páginas físicas REALMENTE mapeadas — monótono,
+    /// solo crece. Necesario porque `heap_top` sí puede bajar: sin este
+    /// segundo campo, un `brk()` que baja y luego vuelve a subir DENTRO
+    /// de una zona ya mapeada antes intentaría volver a mapear una
+    /// página que `mmu::map_page_in` ya tiene como presente — y esa
+    /// función falla a propósito en vez de no-opear ("ya había una
+    /// página mapeada ahí", pensado para detectar bugs de solapamiento,
+    /// no para este caso legítimo). Limitación conocida: como nunca se
+    /// desmapea de verdad, un heap que sube y baja mucho desperdicia
+    /// memoria física hasta que el proceso entero termina.
+    pub heap_mapped_end: u64,
 }
 
 static NEXT_PID: AtomicU64 = AtomicU64::new(1);
@@ -63,12 +109,24 @@ pub fn register(pid: u64, parent_pid: u64, page_table: u64) {
             parent_pid,
             page_table,
             state: ProcessState::Running,
+            fds: Vec::new(),
+            heap_top: HEAP_BASE,
+            heap_mapped_end: HEAP_BASE,
         });
     }
 }
 
 pub fn find(pid: u64) -> Option<Pcb> {
-    unsafe { (*TABLE.0.get()).iter().find(|p| p.pid == pid).copied() }
+    unsafe { (*TABLE.0.get()).iter().find(|p| p.pid == pid).cloned() }
+}
+
+/// Acceso mutable de un solo uso al PCB de `pid`, para syscalls que
+/// necesitan tocar `fds`/`heap_top` (`SYS_READ`/`SYS_WRITE`/`SYS_OPEN`/
+/// `SYS_CLOSE`/`SYS_BRK`) sin repetir el mismo barrido lineal +
+/// `iter_mut().find()` que ya hacían `set_page_table`/`mark_zombie` por
+/// cada campo nuevo. `None` si el PID no está registrado.
+pub fn with_pid_mut<R>(pid: u64, f: impl FnOnce(&mut Pcb) -> R) -> Option<R> {
+    unsafe { (*TABLE.0.get()).iter_mut().find(|p| p.pid == pid).map(f) }
 }
 
 /// Actualiza el PML4 de un proceso — para `execve()`, que reemplaza

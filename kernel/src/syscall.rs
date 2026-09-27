@@ -17,12 +17,17 @@ use crate::caps;
 use crate::elf;
 use crate::gdt;
 use crate::mmu;
+use crate::pmm;
 use crate::process;
+use crate::process::FdEntry;
 use crate::ring3;
 use crate::scheduler;
+use crate::serial::SerialPort;
 use crate::serial_println;
 use crate::signal;
 use crate::vfs;
+use alloc::string::String;
+use alloc::vec::Vec;
 
 const IA32_EFER: u32 = 0xC000_0080;
 const IA32_STAR: u32 = 0xC000_0081;
@@ -63,12 +68,29 @@ static mut USER_RSP_SCRATCH: u64 = 0;
 pub const SYS_PING: u64 = 1;
 // Numeración compatible con Linux x86_64 donde aplica — ya documentado
 // en ARCHITECTURE.md §Convención de syscalls.
+pub const SYS_READ: u64 = 0;
+// `SYS_WRITE` NO es el 1 real de Linux — SYS_PING, de una demo M1
+// mucho anterior a M8, se quedó con ese número primero, y renumerarlo
+// ahora rompería los bytes ya ensamblados a mano de cada `TEST_ELF_*`
+// existente (`mov eax, 1` está incrustado en decenas de sitios). "Donde
+// aplica" en el comentario de arriba significa esto: se sigue a Linux
+// salvo colisión con algo que ya existía primero.
+pub const SYS_WRITE: u64 = 63;
+pub const SYS_OPEN: u64 = 2;
+pub const SYS_CLOSE: u64 = 3;
+pub const SYS_BRK: u64 = 12;
 pub const SYS_GETPID: u64 = 39;
 pub const SYS_FORK: u64 = 57;
 pub const SYS_EXECVE: u64 = 59;
 pub const SYS_EXIT: u64 = 60;
 pub const SYS_WAIT: u64 = 61; // == wait4 en Linux x86_64; no hay "wait" clásica en esa ABI
 pub const SYS_KILL: u64 = 62;
+
+/// Flag de `open()` para pedir escritura — el resto de bits de Linux
+/// (`O_CREAT`, `O_TRUNC`...) no aplican todavía: `sys_open` siempre
+/// escribe en blanco (ver su comentario), así que no hay nada que
+/// decidir a partir de ellos por ahora.
+pub const O_WRONLY: u64 = 0x1;
 
 /// Argumentos de una syscall, en el orden `syscall/sysret` de Linux
 /// x86_64 (RAX=número, RDI/RSI/RDX/R10/R8/R9=args) — ya documentado en
@@ -205,6 +227,11 @@ extern "C" fn syscall_dispatch(frame: *mut SyscallFrame) -> u64 {
             );
             0xC0FFEE
         }
+        SYS_READ => sys_read(frame),
+        SYS_WRITE => sys_write(frame),
+        SYS_OPEN => sys_open(frame),
+        SYS_CLOSE => sys_close(frame),
+        SYS_BRK => sys_brk(frame),
         SYS_GETPID => process::current_pid(),
         SYS_FORK => {
             if let Err(v) = caps::enforce_current(caps::CAP_EXEC) {
@@ -402,6 +429,255 @@ fn sys_kill(frame: &SyscallFrame) -> u64 {
     0
 }
 
+/// Copia una cadena C (terminada en NUL) desde un puntero de usuario —
+/// mismo patrón ya usado en `sys_execve` para el nombre del fichero,
+/// extraído aquí porque `sys_open` lo necesita igual. Los punteros de
+/// usuario se leen directamente (sin copiar a través de ninguna
+/// validación de rango): válido mientras el proceso que llama no sea
+/// hostil — este kernel todavía no se defiende de un proceso de
+/// usuario malicioso que pase punteros fuera de su propio espacio, ver
+/// `docs/TODO.md`.
+fn read_user_cstr(ptr: *const u8, buf: &mut [u8; 64]) -> Result<&str, &'static str> {
+    let mut len = 0usize;
+    unsafe {
+        while len < buf.len() {
+            let b = *ptr.add(len);
+            if b == 0 {
+                break;
+            }
+            buf[len] = b;
+            len += 1;
+        }
+    }
+    core::str::from_utf8(&buf[..len]).map_err(|_| "nombre de fichero no es UTF-8 válido")
+}
+
+/// Busca el primer slot libre (`None`) en `fds`, o añade uno nuevo si
+/// no hay ninguno — el fd resultante es `3 + índice` (0/1/2 son
+/// stdin/stdout/stderr, nunca ocupan un slot real, ver `process.rs`).
+fn alloc_fd(fds: &mut Vec<Option<FdEntry>>, entry: FdEntry) -> u64 {
+    for (i, slot) in fds.iter_mut().enumerate() {
+        if slot.is_none() {
+            *slot = Some(entry);
+            return (i + 3) as u64;
+        }
+    }
+    fds.push(Some(entry));
+    (fds.len() - 1 + 3) as u64
+}
+
+/// `read(fd, buf, count)` — M8, primer paso POSIX para mlibc. `fd=0`
+/// (stdin) todavía no tiene una fuente real que leer de forma no
+/// bloqueante desde ring 3 (necesitaría integrar el teclado/serie con
+/// el scheduler) — devuelve 0 (EOF) a propósito, limitación conocida,
+/// documentada en `docs/TODO.md`, no un bug silencioso. `fd>=3` sirve
+/// del buffer que `open()` ya cargó entero del VFS.
+fn sys_read(frame: &SyscallFrame) -> u64 {
+    let fd = frame.arg0;
+    let buf = frame.arg1 as *mut u8;
+    let count = frame.arg2 as usize;
+
+    if fd == 0 {
+        if let Err(v) = caps::enforce_current(caps::CAP_STDIO) {
+            serial_println!("[syscall] SYS_READ DENEGADO (stdin) — falta CAP_STDIO (pedido=0x{:x})", v.requested);
+            return u64::MAX;
+        }
+        return 0; // EOF — ver nota de arriba.
+    }
+    if fd == 1 || fd == 2 {
+        return u64::MAX; // EBADF: stdout/stderr no son legibles.
+    }
+    if let Err(v) = caps::enforce_current(caps::CAP_FS_READ) {
+        serial_println!("[syscall] SYS_READ DENEGADO — falta CAP_FS_READ (pedido=0x{:x})", v.requested);
+        return u64::MAX;
+    }
+
+    let pid = process::current_pid();
+    let index = (fd as usize).wrapping_sub(3);
+    let result = process::with_pid_mut(pid, |pcb| {
+        let Some(Some(FdEntry::ReadFile { data, cursor })) = pcb.fds.get_mut(index) else {
+            return u64::MAX;
+        };
+        let remaining = data.len() - *cursor;
+        let n = core::cmp::min(count, remaining);
+        unsafe {
+            core::ptr::copy_nonoverlapping(data[*cursor..].as_ptr(), buf, n);
+        }
+        *cursor += n;
+        n as u64
+    });
+    result.unwrap_or(u64::MAX)
+}
+
+/// `write(fd, buf, count)` — `fd=1`/`2` van al puerto serie (stdout y
+/// stderr son el mismo canal en este kernel, no hay terminal separada
+/// todavía). `fd>=3` acumula en el buffer en memoria de la entrada
+/// `WriteFile`, que se vuelca de verdad al VFS en `close()`.
+fn sys_write(frame: &SyscallFrame) -> u64 {
+    let fd = frame.arg0;
+    let buf = frame.arg1 as *const u8;
+    let count = frame.arg2 as usize;
+
+    if fd == 1 || fd == 2 {
+        if let Err(v) = caps::enforce_current(caps::CAP_STDIO) {
+            serial_println!("[syscall] SYS_WRITE DENEGADO (stdio) — falta CAP_STDIO (pedido=0x{:x})", v.requested);
+            return u64::MAX;
+        }
+        let mut port = SerialPort::init();
+        let bytes = unsafe { core::slice::from_raw_parts(buf, count) };
+        for &b in bytes {
+            port.write_byte(b);
+        }
+        return count as u64;
+    }
+    if fd == 0 {
+        return u64::MAX; // EBADF: stdin no es escribible.
+    }
+    if let Err(v) = caps::enforce_current(caps::CAP_FS_WRITE) {
+        serial_println!("[syscall] SYS_WRITE DENEGADO — falta CAP_FS_WRITE (pedido=0x{:x})", v.requested);
+        return u64::MAX;
+    }
+
+    let pid = process::current_pid();
+    let index = (fd as usize).wrapping_sub(3);
+    let result = process::with_pid_mut(pid, |pcb| {
+        let Some(Some(FdEntry::WriteFile { data, .. })) = pcb.fds.get_mut(index) else {
+            return u64::MAX;
+        };
+        let bytes = unsafe { core::slice::from_raw_parts(buf, count) };
+        data.extend_from_slice(bytes);
+        count as u64
+    });
+    result.unwrap_or(u64::MAX)
+}
+
+/// `open(path, flags)` — solo mira el bit `O_WRONLY`, ver su
+/// definición más arriba. Sin él: lectura, el fichero debe existir ya
+/// en el VFS. Con él: escritura, siempre empieza en blanco (como si
+/// `O_TRUNC` estuviera puesto siempre) — no hay escritura incremental
+/// real al VFS todavía (ver `FdEntry::WriteFile`), así que "abrir para
+/// escritura sin truncar" no tiene sentido aquí; `O_CREAT` tampoco hace
+/// falta comprobarlo, escribir siempre "crea" el fichero de todas
+/// formas (`vfs::write` no distingue crear de sobrescribir).
+fn sys_open(frame: &SyscallFrame) -> u64 {
+    let writing = frame.arg1 & O_WRONLY != 0;
+    if let Err(v) = caps::enforce_current(if writing { caps::CAP_FS_WRITE } else { caps::CAP_FS_READ }) {
+        serial_println!(
+            "[syscall] SYS_OPEN DENEGADO — pedido=0x{:x}, otorgado=0x{:x}",
+            v.requested,
+            v.granted
+        );
+        return u64::MAX;
+    }
+
+    let mut name_buf = [0u8; 64];
+    let name = match read_user_cstr(frame.arg0 as *const u8, &mut name_buf) {
+        Ok(n) => n,
+        Err(e) => {
+            serial_println!("[syscall] open: {}", e);
+            return u64::MAX;
+        }
+    };
+
+    let entry = if writing {
+        FdEntry::WriteFile { name: String::from(name), data: Vec::new() }
+    } else {
+        match vfs::read(name) {
+            Some(data) => FdEntry::ReadFile { data, cursor: 0 },
+            None => {
+                serial_println!("[syscall] open: '{}' no existe en el VFS", name);
+                return u64::MAX;
+            }
+        }
+    };
+
+    let pid = process::current_pid();
+    let fd = process::with_pid_mut(pid, |pcb| alloc_fd(&mut pcb.fds, entry)).unwrap_or(u64::MAX);
+    serial_println!(
+        "[syscall] open: PID {} -> '{}' ({}), fd={}",
+        pid,
+        name,
+        if writing { "escritura" } else { "lectura" },
+        fd
+    );
+    fd
+}
+
+/// `close(fd)` — para un `WriteFile`, este es el momento en que el
+/// contenido acumulado en memoria se vuelca de verdad al VFS
+/// (`vfs::write`); antes de esto, cerrar sin haber llamado a `close()`
+/// perdería los datos (igual que un `fclose()` real necesita para que
+/// el buffer de libc no se quede a medias).
+fn sys_close(frame: &SyscallFrame) -> u64 {
+    let fd = frame.arg0;
+    if fd < 3 {
+        return 0; // cerrar stdin/stdout/stderr es un no-op válido.
+    }
+    let pid = process::current_pid();
+    let index = (fd as usize).wrapping_sub(3);
+    let result = process::with_pid_mut(pid, |pcb| {
+        let Some(slot) = pcb.fds.get_mut(index) else {
+            return u64::MAX;
+        };
+        match slot.take() {
+            Some(FdEntry::WriteFile { name, data }) => {
+                serial_println!("[syscall] close: PID {} vuelca {} bytes en '{}'", pid, data.len(), name);
+                vfs::write(&name, &data);
+                0
+            }
+            Some(FdEntry::ReadFile { .. }) => 0,
+            None => u64::MAX,
+        }
+    });
+    result.unwrap_or(u64::MAX)
+}
+
+/// `brk(addr)` — `addr=0` consulta el límite actual sin cambiar nada
+/// (convención estándar de `brk()`). Solo crece de verdad mapeando
+/// páginas nuevas cuando `addr` supera lo que YA está mapeado
+/// (`heap_mapped_end`, ver su comentario en `process.rs` sobre por qué
+/// hace falta un segundo campo aparte de `heap_top`); bajar el límite
+/// nunca desmapea, es contabilidad lógica únicamente.
+fn sys_brk(frame: &SyscallFrame) -> u64 {
+    if let Err(v) = caps::enforce_current(caps::CAP_MEM_MAP) {
+        serial_println!("[syscall] SYS_BRK DENEGADO — falta CAP_MEM_MAP (pedido=0x{:x})", v.requested);
+        return u64::MAX;
+    }
+
+    let requested = frame.arg0;
+    let pid = process::current_pid();
+    let Some(pcb) = process::find(pid) else {
+        return u64::MAX;
+    };
+    if requested == 0 {
+        return pcb.heap_top;
+    }
+    if requested <= pcb.heap_top {
+        process::with_pid_mut(pid, |p| p.heap_top = requested);
+        return requested;
+    }
+
+    let new_mapped_end = (requested + 0xFFF) & !0xFFF;
+    let mut page = pcb.heap_mapped_end;
+    while page < new_mapped_end {
+        let Some(phys) = pmm::alloc_frame() else {
+            serial_println!("[syscall] brk: sin memoria física para crecer el heap");
+            return pcb.heap_top;
+        };
+        if let Err(e) = unsafe { mmu::map_page_in(pcb.page_table, page, phys, true, false) } {
+            serial_println!("[syscall] brk: fallo mapeando 0x{:x}: {}", page, e);
+            return pcb.heap_top;
+        }
+        page += 4096;
+    }
+
+    process::with_pid_mut(pid, |p| {
+        p.heap_top = requested;
+        p.heap_mapped_end = new_mapped_end;
+    });
+    requested
+}
+
 /// `execve()` — reemplaza el proceso actual por un binario nuevo.
 /// `arg0` = puntero (en el espacio de direcciones YA activo del
 /// proceso llamante) a una cadena con el nombre del fichero en el VFS.
@@ -411,23 +687,11 @@ fn sys_kill(frame: &SyscallFrame) -> u64 {
 /// siguiente syscall, `SYSCALL_STACK_TOP` es fijo), y `sysretq` del
 /// handler naked nunca se ejecuta para esta invocación.
 fn sys_execve(frame: &SyscallFrame) -> u64 {
-    let name_ptr = frame.arg0 as *const u8;
     let mut name_buf = [0u8; 64];
-    let mut len = 0usize;
-    unsafe {
-        while len < name_buf.len() {
-            let b = *name_ptr.add(len);
-            if b == 0 {
-                break;
-            }
-            name_buf[len] = b;
-            len += 1;
-        }
-    }
-    let name = match core::str::from_utf8(&name_buf[..len]) {
-        Ok(s) => s,
-        Err(_) => {
-            serial_println!("[syscall] execve: nombre de fichero no es UTF-8 válido");
+    let name = match read_user_cstr(frame.arg0 as *const u8, &mut name_buf) {
+        Ok(n) => n,
+        Err(e) => {
+            serial_println!("[syscall] execve: {}", e);
             return u64::MAX;
         }
     };
