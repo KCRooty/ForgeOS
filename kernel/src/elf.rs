@@ -406,22 +406,20 @@ pub const TEST_ELF_FORK_WAIT: [u8; 189] = [
 /// en el VFS antes de lanzar este binario — ver comando `ember` de la
 /// consola.
 ///
-/// **Limitación conocida, documentada a propósito:** un PID 1 real no
-/// termina nunca — se queda vivo para reapear huérfanos y relanzar
-/// servicios caídos. Este SÍ llama a `exit()` al final de su secuencia
-/// de arranque — ya NO por un bloqueo técnico (`preempt.rs` ya existe
-/// y tiene `TSS.RSP0` por tarea, `preempttest3` confirma que un proceso
-/// de ring 3 que nunca ejecuta `syscall` se puede interrumpir e
-/// intercalar con normalidad), sino por una decisión de política
-/// todavía sin tomar: la preemption real está apagada por defecto
-/// (`preempt::ENABLED`, ver su nota) para el resto de la sesión de
-/// consola, precisamente para que `task_a`/`task_b` (que tampoco
-/// terminan nunca) no acaben imprimiendo sin parar de fondo. Dejar a
-/// Ember vivo para siempre exigiría encender la preemption de forma
-/// permanente desde ese punto del arranque — pieza aparte, con esa
-/// consecuencia a resolver primero.
+/// **Ya NO termina nunca — PID 1 real.** Versión anterior de este
+/// comentario documentaba un `exit()` al final "por política, no por
+/// bloqueo técnico" (la preemption real en ring 3 ya existía, pero se
+/// dejaba apagada por defecto para el resto de la sesión). Esa
+/// decisión ya está tomada: el comando `ember` de la consola enciende
+/// `preempt::set_enabled(true)` y la deja encendida para siempre en
+/// cuanto Ember arranca — de ahí que este binario termine su secuencia
+/// con un `jmp $` infinito en vez de `exit()`. `task_a`/`task_b` (M4a)
+/// se arreglaron para terminar de verdad tras sus 3 vueltas (antes
+/// daba igual, la preemption real estaba siempre apagada llegados a
+/// ese punto) — sin eso, habrían seguido imprimiendo de fondo para
+/// siempre en cuanto la preemption se quedara encendida.
 #[rustfmt::skip]
-pub const TEST_ELF_EMBER: [u8; 293] = [
+pub const TEST_ELF_EMBER: [u8; 284] = [
     0x7F, 0x45, 0x4C, 0x46, 0x02, 0x01, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00,
     0x00, 0x00, 0x00, 0x00, 0x02, 0x00, 0x3E, 0x00, 0x01, 0x00, 0x00, 0x00,
     0x78, 0x00, 0x00, 0x00, 0xA0, 0x00, 0x00, 0x00, 0x40, 0x00, 0x00, 0x00,
@@ -430,15 +428,15 @@ pub const TEST_ELF_EMBER: [u8; 293] = [
     0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x05, 0x00, 0x00, 0x00,
     0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
     0xA0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xA0, 0x00, 0x00, 0x00,
-    0x25, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x25, 0x01, 0x00, 0x00,
+    0x1C, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x1C, 0x01, 0x00, 0x00,
     0x00, 0x00, 0x00, 0x00, 0x00, 0x10, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-    // --- código (151 bytes) + datos (22 bytes) ---
+    // --- código (142 bytes) + datos (22 bytes) ---
     // ronda 1: fork() + (hijo: execve("ember-svc0")) / (padre: wait()+ping)
     0xB8, 0x39, 0x00, 0x00, 0x00, // mov eax, 57  (SYS_FORK)
     0x0F, 0x05,                   // syscall
     0x85, 0xC0,                   // test eax, eax
     0x75, 0x1F,                   // jnz padre_r1 (+31)
-    0x48, 0xBF, 0x0F, 0x01, 0x00, 0x00, 0xA0, 0x00, 0x00, 0x00, // movabs rdi, &"ember-svc0"
+    0x48, 0xBF, 0x06, 0x01, 0x00, 0x00, 0xA0, 0x00, 0x00, 0x00, // movabs rdi, &"ember-svc0"
     0xB8, 0x3B, 0x00, 0x00, 0x00, // mov eax, 59  (SYS_EXECVE)
     0x0F, 0x05,                   // syscall
     0xBF, 0x01, 0x00, 0x00, 0x00, // mov edi, 1   (execve falló)
@@ -458,7 +456,7 @@ pub const TEST_ELF_EMBER: [u8; 293] = [
     0x0F, 0x05,                   // syscall
     0x85, 0xC0,                   // test eax, eax
     0x75, 0x1F,                   // jnz padre_r2 (+31)
-    0x48, 0xBF, 0x1A, 0x01, 0x00, 0x00, 0xA0, 0x00, 0x00, 0x00, // movabs rdi, &"ember-svc1"
+    0x48, 0xBF, 0x11, 0x01, 0x00, 0x00, 0xA0, 0x00, 0x00, 0x00, // movabs rdi, &"ember-svc1"
     0xB8, 0x3B, 0x00, 0x00, 0x00, // mov eax, 59  (SYS_EXECVE)
     0x0F, 0x05,                   // syscall
     0xBF, 0x01, 0x00, 0x00, 0x00, // mov edi, 1   (execve falló)
@@ -473,16 +471,14 @@ pub const TEST_ELF_EMBER: [u8; 293] = [
     0x89, 0xC7,                   // mov edi, eax  (PID recogido -> ping)
     0xB8, 0x01, 0x00, 0x00, 0x00, // mov eax, 1   (SYS_PING)
     0x0F, 0x05,                   // syscall
-    // secuencia de arranque completa: ping(PID propio de Ember) + exit(0)
+    // secuencia de arranque completa: ping(PID propio de Ember) — y
+    // AHORA se queda viva para siempre (jmp $), nunca exit()
     0xB8, 0x27, 0x00, 0x00, 0x00, // mov eax, 39  (SYS_GETPID)
     0x0F, 0x05,                   // syscall
     0x89, 0xC7,                   // mov edi, eax
     0xB8, 0x01, 0x00, 0x00, 0x00, // mov eax, 1   (SYS_PING)
     0x0F, 0x05,                   // syscall
-    0x31, 0xFF,                   // xor edi, edi
-    0xB8, 0x3C, 0x00, 0x00, 0x00, // mov eax, 60  (SYS_EXIT)
-    0x0F, 0x05,                   // syscall
-    0xEB, 0xFE,                   // jmp $ (no debería llegar aquí)
+    0xEB, 0xFE,                   // jmp $ (para siempre — PID 1 real, nunca termina)
     // "ember-svc0\0ember-svc1\0"
     0x65, 0x6D, 0x62, 0x65, 0x72, 0x2D, 0x73, 0x76, 0x63, 0x30, 0x00,
     0x65, 0x6D, 0x62, 0x65, 0x72, 0x2D, 0x73, 0x76, 0x63, 0x31, 0x00,

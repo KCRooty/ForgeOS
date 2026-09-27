@@ -361,6 +361,42 @@ sesión de consola es una decisión de política aparte: `task_a`/`task_b`
 en cuanto se tomara. Pieza aparte, con esa consecuencia que resolver
 primero (o aceptar).
 
+**Actualización — Ember ya se queda viva para siempre de verdad
+(Claude Code, verificado en QEMU):** decisión tomada. `task_a`/`task_b`
+(M4a) se arreglaron para terminar de verdad tras sus 3 vueltas
+(`scheduler::mark_current_finished()` + un último `yield_now()`, mismo
+patrón que `sys_exit()`) en vez de repetir para siempre — antes daba
+igual porque la preemption real estaba siempre apagada llegados a ese
+punto del arranque; ahora ya no. `TEST_ELF_EMBER` termina su secuencia
+con un `jmp $` infinito en vez de `exit()`, y el comando `ember` de la
+consola enciende `preempt::set_enabled(true)` **antes** de ceder el
+turno por primera vez (no después) y no la vuelve a apagar — Ember
+pasa a ser un PID 1 real que no termina nunca, verificado con varios
+`ps` seguidos a lo largo de una sesión larga (ext2, partinfo, forktest,
+meminfo de por medio) mostrando `1  0  running` de forma consistente,
+sin que nada más se rompa.
+
+**Bug real encontrado (y arreglado) durante la propia verificación:**
+la primera versión encendía `preempt::set_enabled(true)` DESPUÉS del
+bucle de `yield_now()` que deja correr a Ember, no antes. Como Ember ya
+no termina, en cuanto le tocaba turno corría sus dos rondas y caía en
+su `jmp $` infinito — con la preemption todavía apagada en ese momento,
+nada podía volver a interrumpirla, así que el último `yield_now()` del
+bucle nunca regresaba: la consola entera se quedaba colgada para
+siempre, silenciosamente (sin panic, sin error, solo dejaba de
+responder). Arreglado invirtiendo el orden: encender la preemption
+ANTES del bucle de yields, para que el timer pueda recuperar el
+control pase lo que pase, incluso si Ember nunca cede el turno por su
+cuenta.
+
+**Interacción documentada, no un bug:** `preempt::ENABLED` es un único
+flag global, no un contador de referencias — si después de `ember` se
+ejecuta `preempttest`/`preempttest3` (que apagan la preemption al
+terminar su propia ventana acotada), también apagan la de Ember, que
+se queda entonces parada para siempre en `running` sin avanzar más
+(inofensivo: no cuelga nada ni corrompe memoria, simplemente deja de
+recibir turno). `preempt::set_enabled(true)` a mano lo restaura.
+
 ---
 
 ## 0. Reconstrucción pendiente (importado desde el histórico de chat)
@@ -537,16 +573,16 @@ zip correspondiente. `process.rs` y fork/execve/exit/getpid (milestone
   buen precedente para una versión más rica más adelante
 - ❌ **Memoria compartida (SHM)** — necesaria más adelante para el
   compositor gráfico (ventanas cliente)
-- ✅ **Ember (primer boceto)** *verificado en QEMU* — modelo rc.d de
-  FreeBSD (secuencial, no systemd), comando `ember` de la consola —
-  ver actualización arriba. **Pendiente para que sea un PID 1 real:**
-  arrancado automáticamente por el kernel (hoy solo a demanda desde la
-  consola, con PPID 0 igual que un test más), lista de servicios real
-  en vez de dos placeholders hardcodeados, permanencia indefinida tras
-  el arranque (necesita `preempt.rs` primero — ver limitación
-  documentada arriba), y el patrón **privsep** ya documentado en
-  `PHILOSOPHY.md` (proceso sin privilegios + supervisor mínimo) para
-  cada demonio real que Ember termine lanzando.
+- ✅ **Ember** *verificado en QEMU* — modelo rc.d de FreeBSD
+  (secuencial, no systemd), comando `ember` de la consola. **Ya se
+  queda viva para siempre** (PID 1 real, `jmp $` infinito + preemption
+  real permanente desde que arranca) — ver actualización arriba.
+  **Pendiente:** arrancado automáticamente por el kernel (hoy solo a
+  demanda desde la consola, con PPID 0 igual que un test más), lista de
+  servicios real en vez de dos placeholders hardcodeados, y el patrón
+  **privsep** ya documentado en `PHILOSOPHY.md` (proceso sin
+  privilegios + supervisor mínimo) para cada demonio real que Ember
+  termine lanzando.
 
 ## 3. Filesystem (M5)
 

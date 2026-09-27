@@ -88,8 +88,18 @@ use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 /// esta puerta, apagada por defecto — `timer_tick` sigue contando
 /// ticks y mandando EOI siempre, pero solo llama a `yield_now()` si
 /// esto está a `true`. `preempttest`/`preempttest3` (comandos de
-/// consola) son quienes la encienden, de forma acotada, para su propia
-/// demostración.
+/// consola) la encienden de forma ACOTADA (la vuelven a apagar al
+/// terminar su propia ventana de prueba); `ember` la enciende y la
+/// deja encendida PARA SIEMPRE, porque Ember ya no termina (necesita
+/// preemption real para siempre, no solo durante su arranque).
+///
+/// Interacción a tener en cuenta, no un bug: un único flag global, no
+/// contador de referencias — si `ember` ya la dejó encendida para
+/// siempre y DESPUÉS se ejecuta `preempttest`/`preempttest3`, su propio
+/// apagado al final de la ventana también apaga la de Ember (que se
+/// queda entonces parada para siempre en `Running`, sin avanzar más,
+/// pero sin colgar nada ni corromper memoria — simplemente deja de
+/// recibir turno). `preempt::set_enabled(true)` a mano lo restaura.
 static ENABLED: AtomicBool = AtomicBool::new(false);
 
 pub fn set_enabled(enabled: bool) {

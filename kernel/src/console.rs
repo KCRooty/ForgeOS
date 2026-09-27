@@ -495,7 +495,19 @@ fn run_ember(port: &mut SerialPort) {
         c
     });
     if let Some(pid) = launch_elf(port, &elf::TEST_ELF_EMBER, 0) {
-        let _ = write!(port, "PID {} (Ember) arrancado — cediendo turno...\r\n", pid);
+        let _ = write!(port, "PID {} (Ember) arrancado — activando preemption real...\r\n", pid);
+        // CRÍTICO: encender la preemption ANTES de ceder el turno, no
+        // después. Ember ya no termina (ver TEST_ELF_EMBER) — en cuanto
+        // le toque turno, corre sus dos rondas de fork+execve+wait y
+        // cae en su `jmp $` infinito. Si la preemption siguiera
+        // apagada en ese momento (como en la primera versión de esta
+        // función, que la encendía DESPUÉS del bucle de yields), Ember
+        // se queda ahí para siempre y ninguno de los yields de abajo
+        // volvería nunca — la consola entera se cuelga. Con la
+        // preemption ya encendida, el timer se encarga de devolver el
+        // control pase lo que pase, aunque Ember nunca ceda el turno
+        // por su cuenta.
+        preempt::set_enabled(true);
         // Dos rondas secuenciales de fork+execve+wait encadenadas dentro
         // del mismo proceso — mismo patrón que `waittest` (una ronda,
         // 2 yields bastaron), aquí con margen extra por ser dos rondas.
@@ -505,8 +517,9 @@ fn run_ember(port: &mut SerialPort) {
         let _ = write!(
             port,
             "de vuelta en la consola — revisa 'ps': los dos servicios ya no deberían aparecer \
-             (Ember los reapeó con wait(), memoria liberada de verdad); Ember mismo sí queda \
-             como zombie(code=0) — nadie lo espera, se lanzó directo desde la consola (PPID 0).\r\n"
+             (Ember los reapeó con wait(), memoria liberada de verdad); Ember mismo sigue \
+             'running' para siempre, como un PID 1 real. Preemption real activada de forma \
+             permanente a partir de ahora.\r\n"
         );
     }
 }

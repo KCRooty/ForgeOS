@@ -324,16 +324,34 @@ pub extern "C" fn kernel_main_upper(mb2_info_ptr: u64) -> ! {
     console::run()
 }
 
+// Terminan de verdad tras 3 vueltas (mismas 3 que ya se veían en el
+// log con la demo cooperativa de 6 yields) en vez de repetir para
+// siempre — antes daba igual, porque la preemption real estaba siempre
+// apagada tras esos primeros yields; desde que `ember` la deja
+// encendida de forma permanente (ver console.rs), dos tareas que nunca
+// terminan habrían seguido imprimiendo de fondo mientras la sesión
+// viviera. `mark_current_finished()` + un último `yield_now()` es el
+// mismo patrón que ya usa `sys_exit()` — tras eso, el scheduler las
+// salta para siempre en el round-robin, no hace falta que dejen de
+// existir de verdad.
 fn task_a() -> ! {
-    loop {
+    for _ in 0..3 {
         serial_println!("[task A] hola desde la tarea A");
+        scheduler::yield_now();
+    }
+    scheduler::mark_current_finished();
+    loop {
         scheduler::yield_now();
     }
 }
 
 fn task_b() -> ! {
-    loop {
+    for _ in 0..3 {
         serial_println!("[task B] hola desde la tarea B");
+        scheduler::yield_now();
+    }
+    scheduler::mark_current_finished();
+    loop {
         scheduler::yield_now();
     }
 }
