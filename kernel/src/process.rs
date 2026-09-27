@@ -50,6 +50,11 @@ pub enum FdEntry {
 /// código (0xA0...) y la pila temporal de `execve` (0xC0...).
 pub const HEAP_BASE: u64 = 0x0000_00B0_0000_0000;
 
+/// Dirección virtual base del arena de `mmap()` de cada proceso — 832
+/// GiB, misma familia que `HEAP_BASE`, clara también de esta (0xB0...)
+/// y de la pila temporal de `execve` (0xC0...).
+pub const MMAP_BASE: u64 = 0x0000_00D0_0000_0000;
+
 #[derive(Clone)]
 pub struct Pcb {
     pub pid: u64,
@@ -76,6 +81,11 @@ pub struct Pcb {
     /// desmapea de verdad, un heap que sube y baja mucho desperdicia
     /// memoria física hasta que el proceso entero termina.
     pub heap_mapped_end: u64,
+    /// `mmap()` (anónimo únicamente, ver `syscall::sys_mmap`) — arena
+    /// que solo crece, nunca reutiliza rango (`munmap()` es un no-op a
+    /// propósito, mismo espíritu que `heap_top` nunca desmapeando de
+    /// verdad). Cada mapeo nuevo empieza donde acabó el anterior.
+    pub mmap_next: u64,
 }
 
 static NEXT_PID: AtomicU64 = AtomicU64::new(1);
@@ -112,6 +122,7 @@ pub fn register(pid: u64, parent_pid: u64, page_table: u64) {
             fds: Vec::new(),
             heap_top: HEAP_BASE,
             heap_mapped_end: HEAP_BASE,
+            mmap_next: MMAP_BASE,
         });
     }
 }
@@ -227,6 +238,53 @@ pub unsafe fn spawn_process(entry_point: u64, user_stack_top: u64, page_table: u
     pid
 }
 
+/// Número de qwords del frame mínimo que `write_initial_stack_frame`
+/// escribe — ver su comentario.
+const INITIAL_STACK_FRAME_QWORDS: u64 = 5;
+
+/// Escribe, en la cima de la pila de usuario recién mapeada, el frame
+/// mínimo que un `crt0` real (convención SysV x86_64) espera encontrar
+/// al arrancar: `argc` en `[rsp]`, seguido del array `argv[]` terminado
+/// en `NULL`, `envp[]` terminado en `NULL`, y `auxv[]` terminado en
+/// `AT_NULL` (`{0,0}`) — M8b, primer paso hacia poder compilar un
+/// `crt0` de verdad contra esta ABI. De momento siempre "0 argumentos,
+/// sin entorno, sin auxv real": ni `spawn_elf` ni `execve()` aceptan
+/// todavía pasar `argv`/`envp` de verdad (eso es el siguiente paso,
+/// cuando algún binario real los necesite) — lo que importa AHORA es
+/// que la FORMA de la pila ya sea la correcta, para que un `_start`
+/// que lea `[rsp]` como `argc` no encuentre basura sin sentido.
+///
+/// `stack_phys` es la física de la página (accesible directamente,
+/// identity-mapeada — mismo supuesto que ya usa el resto de `mmu.rs`/
+/// `pmm.rs` con toda la RAM dentro de los 4 GiB de QEMU en esta
+/// sesión); `stack_virt_top` es la cima virtual de esa misma página
+/// (`stack_virt + 4096`). Devuelve el RSP inicial ya ajustado —
+/// apuntando a `argc`, con toda la página menos 40 bytes todavía libre
+/// por debajo para el uso normal de pila del proceso.
+unsafe fn write_initial_stack_frame(stack_phys: u64, stack_virt_top: u64) -> u64 {
+    let frame_phys = stack_phys + 4096 - INITIAL_STACK_FRAME_QWORDS * 8;
+    let words = frame_phys as *mut u64;
+    unsafe {
+        words.add(0).write(0); // argc = 0
+        words.add(1).write(0); // argv[0] = NULL (fin de argv, sin argumentos)
+        words.add(2).write(0); // envp[0] = NULL (fin de envp, sin entorno)
+        words.add(3).write(0); // auxv[0].a_type = AT_NULL
+        words.add(4).write(0); // auxv[0].a_val
+    }
+    stack_virt_top - INITIAL_STACK_FRAME_QWORDS * 8
+}
+
+/// Mapea una pila de usuario nueva de una página, con el frame inicial
+/// de `write_initial_stack_frame` ya escrito — núcleo compartido entre
+/// `spawn_elf` y `syscall::sys_execve` (los dos únicos sitios donde un
+/// proceso "arranca de cero" de verdad, a diferencia de `fork()`, que
+/// reanuda la pila YA EXISTENTE del padre).
+pub unsafe fn map_fresh_user_stack(page_table: u64, stack_virt: u64) -> Result<u64, &'static str> {
+    let stack_phys = crate::pmm::alloc_frame().ok_or("sin memoria para la pila de usuario")?;
+    crate::mmu::map_page_in(page_table, stack_virt, stack_phys, true, false)?;
+    Ok(unsafe { write_initial_stack_frame(stack_phys, stack_virt + 4096) })
+}
+
 /// Carga un ELF64 desde `bytes`, le monta una pila de usuario, y lo
 /// arranca como proceso real (`spawn_process`). Núcleo compartido entre
 /// `console::launch_elf` (comandos de la consola, con mensajes de error
@@ -238,10 +296,8 @@ pub unsafe fn spawn_process(entry_point: u64, user_stack_top: u64, page_table: u
 pub unsafe fn spawn_elf(bytes: &[u8], parent_pid: u64) -> Result<u64, &'static str> {
     let loaded = crate::elf::load(bytes)?;
 
-    let stack_phys = crate::pmm::alloc_frame().ok_or("sin memoria para la pila de usuario")?;
     let user_stack_virt: u64 = 0x0000_0090_0000_0000; // 576 GiB, privado del proceso
-    crate::mmu::map_page_in(loaded.page_table, user_stack_virt, stack_phys, true, false)?;
-    let user_stack_top = user_stack_virt + 4096;
+    let user_stack_top = unsafe { map_fresh_user_stack(loaded.page_table, user_stack_virt) }?;
 
     Ok(spawn_process(loaded.entry_point, user_stack_top, loaded.page_table, parent_pid))
 }
