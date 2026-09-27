@@ -9,6 +9,55 @@ use crate::task::{Context, Task, TaskState};
 use alloc::vec::Vec;
 use core::cell::UnsafeCell;
 
+/// Deshabilita IF al crearse, la restaura a lo que fuera ANTES (no
+/// siempre a 1) al soltarse — RAII para que `yield_now()` pueda usar
+/// `return` anticipado sin duplicar la restauración en cada punto de
+/// salida. Bug real encontrado verificando el arranque automático de
+/// Ember con preemption real (milestone "Ember arranca automáticamente
+/// + preemption real permanente"): `yield_now()`/`switch_to` nunca
+/// deshabilitaban IF durante su sección crítica — mientras la
+/// preemption estuvo apagada por defecto (todo el resto de la sesión
+/// hasta este punto) eso daba igual, porque nada disparaba el timer en
+/// medio de un `yield_now()` llamado con IF=1. Pero `ember` deja la
+/// preemption encendida PARA SIEMPRE desde el primer instante en que
+/// arranca, y el propio arranque automático de `main.rs` cede el turno
+/// varias veces con IF=1 (código de kernel normal, no dentro de una
+/// syscall enmascarada) — si el timer dispara justo ahí, su propio
+/// `timer_tick` vuelve a llamar a `yield_now()` DE FORMA REENTRANTE
+/// sobre el mismo `SCHEDULER` global que la llamada externa todavía
+/// está mutando (`sched.current`, CR3, `TSS.RSP0`, `CURRENT_PID`, y
+/// sobre todo los registros a medio guardar/restaurar de
+/// `task::switch_to`, que tampoco es atómico). Confirmado con arranques
+/// repetidos en QEMU: en boots "malos" (~1 de cada 2-3), Ember (PID 1)
+/// terminaba ejecutando literalmente el código de OTRO proceso (fork
+/// espurio, page fault espurio) porque el cambio de contexto se
+/// solapaba con una reentrada del timer a medio camino. Con IF
+/// deshabilitado durante toda la decisión de scheduling + el cambio de
+/// contexto, y restaurado solo una vez que `switch_to` ya volvió (esta
+/// misma tarea, ya a salvo), el timer no puede volver a entrar hasta
+/// que el cambio de contexto haya terminado de verdad.
+struct IrqGuard {
+    was_enabled: bool,
+}
+
+impl IrqGuard {
+    fn disable() -> Self {
+        let flags: u64;
+        unsafe {
+            core::arch::asm!("pushfq", "pop {0}", "cli", out(reg) flags);
+        }
+        IrqGuard { was_enabled: flags & (1 << 9) != 0 }
+    }
+}
+
+impl Drop for IrqGuard {
+    fn drop(&mut self) {
+        if self.was_enabled {
+            unsafe { core::arch::asm!("sti") };
+        }
+    }
+}
+
 pub struct Scheduler {
     tasks: Vec<Task>,
     current: usize,
@@ -71,6 +120,49 @@ pub fn mark_current_finished() {
     }
 }
 
+/// Actualiza el `page_table` de la tarea cuyo `Task::pid` coincida —
+/// para `execve()` (`syscall.rs::sys_execve`), que reemplaza el espacio
+/// de direcciones del proceso actual mientras sigue corriendo (no pasa
+/// por `spawn_with_space`, que es donde normalmente se fija este campo).
+///
+/// BUG real encontrado verificando el arranque automático de Ember:
+/// `sys_execve` actualizaba `process::Pcb.page_table` (la copia que usan
+/// `wait()`/`kill()`/`reap_zombie`) pero NUNCA esta copia paralela que
+/// vive en el `Task` del scheduler — la que `yield_now()` de verdad lee
+/// para decidir a qué CR3 cambiar al devolverle el turno a una tarea.
+/// Mientras el proceso recién `execve`ado no cediera el turno de ninguna
+/// forma antes de llegar a su propio `exit()`, daba igual (nunca se
+/// necesitaba volver a mirar ese campo estando en medio). Pero con
+/// preemption real de por medio, el timer puede interrumpirlo en
+/// CUALQUIER punto de su código nuevo — y al devolverle el turno más
+/// tarde, `yield_now()` restauraba el CR3 VIEJO (el de antes del
+/// `execve`, todavía con una copia completa del código del PADRE por
+/// `fork()`), no el nuevo. El proceso seguía corriendo, pero viendo su
+/// propia memoria a través del mapeo equivocado — con el padre siendo
+/// `ember` (que usa la misma dirección virtual base para su código que
+/// cualquier ELF de prueba, ver `elf.rs`), el resultado era que el hijo
+/// "recién ejecutado" parecía ejecutar el propio código de `ember`
+/// (otro `fork()`, y a la segunda vuelta un page fault) en vez del
+/// `ping()+exit()` real de su binario — reproducido en QEMU: ~1 de cada
+/// 2-3 arranques, siempre con las mismas direcciones físicas (nada
+/// aleatorio de verdad, solo depende de si el timer dispara o no en la
+/// ventana de 2-3 instrucciones entre el `execve` y el `exit()`).
+pub fn set_task_page_table(pid: u64, page_table: u64) -> bool {
+    unsafe {
+        let sched = match (*SCHEDULER.0.get()).as_mut() {
+            Some(s) => s,
+            None => return false,
+        };
+        for task in sched.tasks.iter_mut() {
+            if task.pid == pid {
+                task.page_table = page_table;
+                return true;
+            }
+        }
+        false
+    }
+}
+
 /// Marca como `Finished` la tarea cuyo `Task::pid` coincida —a
 /// diferencia de `mark_current_finished()`, no hace falta que sea la
 /// tarea en ejecución ahora mismo. Para `signal::deliver_default`: matar
@@ -99,7 +191,15 @@ pub fn mark_finished_by_pid(pid: u64) -> bool {
 /// Cede el turno a la siguiente tarea `Ready`/`Running` de la cola
 /// (round-robin, saltando las `Finished`). Si no hay ninguna otra tarea
 /// elegible (o el scheduler no está inicializado), no hace nada.
+///
+/// Sección crítica protegida con `IrqGuard` — ver su comentario largo
+/// sobre el bug real que esto arregla (reentrada del timer a medio
+/// `switch_to`). `_guard` se suelta (restaura IF a lo que fuera antes)
+/// en CUALQUIER punto de salida de la función, incluidos los `return`
+/// tempranos de más abajo, por ser una variable local normal con `Drop`
+/// — no hace falta duplicar la restauración a mano en cada uno.
 pub fn yield_now() {
+    let _guard = IrqGuard::disable();
     unsafe {
         let sched = match (*SCHEDULER.0.get()).as_mut() {
             Some(s) => s,

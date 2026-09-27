@@ -426,6 +426,75 @@ completo", y una batería larga después (`forktest`, `ps`, `segvtest`,
 `running` de fondo en todo momento sin que nada más se rompa, ahora con
 la preemption real activa desde el primer instante en que hay consola.
 
+**Actualización — bug real de corrupción intermitente en el arranque
+de Ember, encontrado y arreglado (Claude Code, verificado en QEMU con
+15+ arranques repetidos):** arrancando la ISO desde cero en bucle
+(scripted, no a mano) salía mal aproximadamente 1 de cada 2-3 veces —
+Ember, tras lanzar y `execve`ar su primer servicio (`ember-svc0`),
+parecía ejecutar OTRO `fork()` en vez del `ping()+exit()` real de ese
+binario, y la segunda "ronda" acababa en un page fault espurio. Nunca se
+había visto porque los arranques manuales anteriores nunca se repitieron
+lo bastante como para topar con la ventana de la carrera.
+
+Dos bugs reales, no uno, encontrados por este camino:
+
+1. **`scheduler::yield_now()`/`task::switch_to` no protegían su propia
+   sección crítica frente al timer.** Mientras la preemption real
+   estuvo apagada por defecto (todo el resto de la sesión hasta este
+   punto), daba igual que `yield_now()` no deshabilitara IF — nada
+   disparaba el timer en medio de un cambio de contexto. Pero `ember`
+   deja la preemption encendida PARA SIEMPRE desde el primer instante en
+   que arranca, y el propio arranque automático (`main.rs`) cede el
+   turno varias veces con IF=1 (código de kernel normal, no dentro de
+   una syscall enmascarada) — si el timer dispara ahí, su propio
+   `timer_tick` reentraba en `yield_now()` sobre el mismo `Scheduler`
+   global que la llamada externa todavía estaba mutando. Arreglado con
+   un guard RAII (`scheduler::IrqGuard`) que deshabilita IF al entrar en
+   `yield_now()` y lo restaura (a lo que fuera ANTES, no siempre a 1) al
+   salir por cualquier camino, incluidos los `return` tempranos — ver el
+   comentario largo en `scheduler.rs`. Necesario, pero (verificado
+   después) NO SUFICIENTE por sí solo para eliminar la corrupción — el
+   bug real, más profundo, era el siguiente.
+2. **El root cause real: `sys_execve` actualizaba la tabla de páginas
+   del proceso en `process::Pcb` pero nunca en `scheduler::Task`.** Son
+   dos copias PARALELAS del mismo dato (`page_table`) — una la usan
+   `wait()`/`kill()`/`reap_zombie` (`process.rs`), la otra es la que
+   `scheduler::yield_now()` de verdad lee para decidir a qué CR3 cambiar
+   al devolverle el turno a una tarea. `execve()` solo tocaba la
+   primera. Mientras un proceso recién `execve`ado nunca cediera el
+   turno de ninguna forma antes de llegar a su propio `exit()`, esto no
+   se notaba (nunca había que "volver a mirar" ese campo estando a medio
+   camino). Pero con preemption real de por medio, el timer puede
+   interrumpirlo en CUALQUIER instrucción de su código nuevo — y al
+   devolverle el turno más tarde, `yield_now()` restauraba el CR3 VIEJO
+   (el PML4 clonado por `fork()` justo antes del `execve`, con una copia
+   completa de la memoria del PADRE). El proceso seguía corriendo, pero
+   viendo su propia memoria a través del mapeo equivocado — y como
+   `ember` usa la misma dirección virtual base para su código que
+   cualquier otro binario de prueba (`elf.rs`, 640 GiB, índice P4=1), el
+   resultado observable era que el hijo "recién ejecutado" parecía
+   ejecutar el propio código de `ember` (otro `fork()`, y a la segunda
+   vuelta un page fault) en vez del suyo. Diagnosticado volcando en
+   serie los bytes físicos reales en el punto de entrada justo tras el
+   `execve` (SIEMPRE correctos, en todos los arranques, buenos y malos
+   por igual) y el valor de CR3 antes/después del `mmu::switch_address_space`
+   — eso descartó "se cargó mal el ELF" y apuntó directo a "algo
+   revierte CR3 más tarde". Arreglado con `scheduler::set_task_page_table`,
+   llamado desde `sys_execve` justo al lado de `process::set_page_table`.
+3. De paso, la interacción ya documentada de `preempt::ENABLED` (un
+   único flag booleano, no contador de referencias — `preempttest`/
+   `preempttest3` apagaban también la preemption permanente de `ember`
+   al terminar su propia ventana de prueba) se convirtió en un contador
+   real (`AtomicU32`, `fetch_add`/`fetch_update` saturando en 0) — cada
+   `set_enabled(true)` suma uno, cada `set_enabled(false)` resta uno;
+   la preemption solo se apaga de verdad cuando nadie más la pidió.
+
+Verificado exhaustivamente: 15 arranques limpios consecutivos desde
+cero (antes del fix, salían mal ~1 de cada 2-3), más una batería de
+regresión completa después de cada uno (`forktest`, `waittest`,
+`segvtest`, `killtest`, `preempttest`, `preempttest3`, `ext2ls`,
+`meminfo`, `ps`) sin ninguna regresión.
+
 ---
 
 ## 0. Reconstrucción pendiente (importado desde el histórico de chat)
