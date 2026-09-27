@@ -547,6 +547,68 @@ sin ninguna regresión, más 18 arranques adicionales desde cero (10 +
 paralelo, + 5 de la propia batería) sin ningún fallo del bug de
 `execve`/CR3 tampoco — los dos arreglos son compatibles entre sí.
 
+**Actualización — M8: `read()`/`write()`/`open()`/`close()`/`brk()`
+reales, primer paso POSIX hacia mlibc (Claude Code, verificado en
+QEMU):** con el TODO original de la reconstrucción completo y los dos
+bugs de concurrencia de arriba ya cerrados, el siguiente bloque grande
+elegido fue mlibc + Bellows (sección 6). Antes de tocar mlibc en sí,
+hacía falta la base que CUALQUIER libc real necesita y que Forge OS no
+tenía todavía: descriptores de fichero de verdad (no solo
+`vfs::read`/`vfs::write` de buffer completo) y un heap al que
+`malloc()` pueda pedir memoria.
+
+Novedades:
+- `process::Pcb` gana `fds: Vec<Option<FdEntry>>` (tabla de
+  descriptores por proceso — `FdEntry::ReadFile{data,cursor}` para
+  lectura, `FdEntry::WriteFile{name,data}` para escritura, ver su
+  comentario en `process.rs`) y `heap_top`/`heap_mapped_end` (el
+  segundo hace falta aparte porque `heap_top` SÍ puede bajar sin
+  desmapear nada, y `mmu::map_page_in` falla a propósito si intentas
+  volver a mapear una página ya presente).
+- `syscall.rs`: `SYS_READ`(0)/`SYS_OPEN`(2)/`SYS_CLOSE`(3)/`SYS_BRK`(12)
+  con la numeración real de Linux x86_64 — pero `SYS_WRITE` NO pudo
+  ser el 1 real: **colisión de números encontrada y arreglada antes
+  de siquiera llegar a QEMU** (el compilador la cazó sola, con un
+  warning nuevo de "unreachable pattern" al comparar contra el
+  baseline de 34 warnings de siempre) porque `SYS_PING`, una demo de
+  M1 mucho anterior, ya ocupaba ese número — `SYS_WRITE` quedó en 63.
+  fd 0/1/2 siempre son stdin/stdout/stderr servidos por el puerto
+  serie (stdin todavía sin fuente real, devuelve EOF a propósito,
+  documentado como limitación conocida, no bug silencioso); fd≥3 usa
+  la tabla nueva. `brk()` solo crece de verdad (mapea páginas físicas
+  nuevas); bajar el límite es contabilidad lógica, nunca desmapea.
+- Capacidades ya existían para todo esto desde M1 (`CAP_FS_READ`,
+  `CAP_FS_WRITE`, `CAP_MEM_MAP`) sin que nada las usara todavía — M8
+  es la primera vez que se aplican de verdad.
+- `TEST_ELF_POSIX` (comando `posixtest`) es el primer binario de
+  prueba de esta sesión que NO se hizo a mano byte a byte: se
+  ensambló con `nasm -f bin` de verdad y se envolvió en el mismo
+  header ELF64 mínimo de siempre — con más syscalls reales, seguir
+  tecleando opcodes a mano ya no es razonable. Prueba la cadena
+  completa: `write(1,...)` a stdout real (antes, la única "salida
+  visible" era el propio log del kernel, nunca algo escrito por un
+  PROCESO) → `open`+`write`+`close`+`open`+`read`+`write(1,...)` — si
+  lo que se ve por stdout coincide con lo que se escribió antes, el
+  roundtrip por el VFS real funciona de principio a fin → `brk(0)` +
+  `brk(+4096)` + escribir y releer un valor de 64 bits en la página
+  nueva del heap, con `ping(0xCAFEBABE)` dejando constancia numérica
+  en el log de que el mapeo es memoria escribible real, no solo
+  contabilidad.
+
+Verificado: `posixtest` funcionó a la primera en QEMU, sin ningún bug
+encontrado en tiempo de ejecución (solo la colisión de números, cazada
+en tiempo de compilación). 5 arranques limpios en aislado + 2
+ejecuciones consecutivas en la misma sesión + batería de regresión
+completa (`forktest`, `waittest`, `segvtest`, `killtest`,
+`preempttest`, `preempttest3`, `ext2ls`, `meminfo`, `ps`) sin ninguna
+regresión. Build limpio, cero warnings nuevos sobre el baseline de 34.
+
+Pendiente para que mlibc en sí sea viable: `crt0` (arranque real de
+proceso con `argv`/`envp`, hoy todo arranca en un `entry` fijo sin
+convención de pila estándar), `mmap()` de verdad (hoy solo hay `brk()`
+lineal), y sobre todo escribir el sysdeps de mlibc contra ESTA ABI
+concreta — trabajo de otra sesión, mlibc es un proyecto en sí mismo.
+
 ---
 
 ## 0. Reconstrucción pendiente (importado desde el histórico de chat)
@@ -737,6 +799,15 @@ zip correspondiente. `process.rs` y fork/execve/exit/getpid (milestone
   **privsep** ya documentado en `PHILOSOPHY.md` (proceso sin
   privilegios + supervisor mínimo) para cada demonio real que Ember
   termine lanzando.
+- ✅ **`read()`/`write()`/`open()`/`close()`/`brk()` reales (M8)**
+  *verificado en QEMU* — ver actualización M8 arriba.
+  `SYS_READ`(0)/`SYS_OPEN`(2)/`SYS_CLOSE`(3)/`SYS_BRK`(12) con
+  numeración real de Linux x86_64; `SYS_WRITE`=63 (no pudo ser el 1
+  real, colisión con `SYS_PING` ya existente desde M1). Primer paso
+  POSIX real hacia mlibc (sección 6) — comando `posixtest`.
+  **Pendiente:** `mmap()` de verdad (hoy `brk()` es lo único que
+  existe), `crt0` con convención de pila estándar (`argv`/`envp`), y
+  el sysdeps de mlibc contra esta ABI en sí.
 
 ## 3. Filesystem (M5)
 
@@ -762,7 +833,12 @@ zip correspondiente. `process.rs` y fork/execve/exit/getpid (milestone
 - ❌ **/proc y /dev sintéticos** — Windows y Linux los dan por hecho
   (info de procesos navegable, nodos de dispositivo) — sin esto no se
   siente "como Windows y Linux" ni de lejos
-- ❌ **Tabla de descriptores de fichero por proceso**
+- ✅ **Tabla de descriptores de fichero por proceso (M8)** *verificado
+  en QEMU* — `process::Pcb.fds`, ver actualización M8 arriba y la
+  entrada de `SYS_READ`/`SYS_WRITE`/`SYS_OPEN`/`SYS_CLOSE` en la
+  sección 2. **Limitación conocida:** cada fd carga/acumula su
+  contenido entero en memoria (el VFS no tiene handles reales) — vale
+  para ficheros pequeños, no para uno que no entre en RAM.
 
 ## 4. HAL — drivers de hardware
 
@@ -828,7 +904,10 @@ zip correspondiente. `process.rs` y fork/execve/exit/getpid (milestone
   desde cero, portar **mlibc** (libc pensada para OSes nuevos, con capa
   de abstracción por sistema; es lo que usa BoredOS). Convierte portar
   software de "meses por programa" a "cambios menores". Ver
-  `COMPATIBILITY.md`
+  `COMPATIBILITY.md`. **Base de syscalls ya lista (M8, sección 2):**
+  `read`/`write`/`open`/`close`/`brk` reales y verificados — falta
+  `mmap()`, `crt0`, y escribir el sysdeps de mlibc contra esta ABI en
+  sí (proyecto propio, otra sesión).
 - ❌ **~50-60 coreutils** — `ls`, `cat`, `cp`, `mv`, `rm`, `ps`, `top`,
   etc. (referencia directa: los coreutils de nyxos-dev)
 - ❌ **Bellows** (el shell real, M4+) — pipelines, redirección, job
