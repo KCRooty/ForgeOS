@@ -306,18 +306,49 @@ pub extern "C" fn kernel_main_upper(mb2_info_ptr: u64) -> ! {
     // TODO M2c: syscalls reales — aquí `caps::enforce` pasa a llamarse
     //           por cada una
     // TODO M3c: ampliar el alfabeto de font.rs más allá de F/O/R/G/E/S/B/T/K
-    // M4b (continuación) — timer conectado al scheduler de verdad,
-    //           ver preempt.rs y el comando `preempttest`. Apagado por
-    //           defecto (preempt::ENABLED) para no cambiar el resto del
-    //           arranque; sin preemption real en ring 3 todavía (ver
-    //           limitación documentada en preempt.rs)
-    // TODO: RSP0 por tarea (gdt.rs) — necesario antes de poder extender
-    //           preempt.rs a procesos de ring 3 con seguridad
+    // M4b (continuación) — timer conectado al scheduler de verdad, con
+    //           TSS.RSP0 por tarea (gdt.rs) — preemption real tanto en
+    //           kernel como en ring 3, ver preempt.rs y los comandos
+    //           `preempttest`/`preempttest3`. Apagada por defecto
+    //           (preempt::ENABLED) hasta que algo la enciende — Ember,
+    //           más abajo, la deja encendida para siempre en cuanto
+    //           arranca.
     // TODO M6+: Anvil + terminal ("Crucible")
 
     // M4g — mecanismo syscall/sysret listo (MSRs configuradas). El
     // comando `synccalltest` de la consola lo ejercita de verdad.
     syscall::init();
+
+    // Ember (PID 1) arranca aquí, automáticamente — ya no hace falta
+    // pedirlo a mano desde la consola (el comando `ember` sigue
+    // existiendo, para relanzarlo o probarlo aparte). Necesita VFS y
+    // `syscall::init()` ya listos, por eso va justo aquí y no antes.
+    // Mismo orden que ya se verificó en `console::run_ember` (crítico,
+    // ver su nota): encender la preemption ANTES de ceder el turno por
+    // primera vez, nunca después — si Ember (que ya no termina, cae en
+    // un `jmp $` infinito tras sus dos rondas) llegara a correr con la
+    // preemption todavía apagada, nada podría recuperar el control
+    // nunca más y el arranque entero se colgaría en silencio.
+    serial_println!("");
+    serial_println!("[ember] registrando servicios y arrancando PID 1...");
+    vfs::write("ember-svc0", &elf::TEST_ELF_PING_EXIT);
+    vfs::write("ember-svc1", &elf::TEST_ELF_PING_EXIT);
+    caps::set_current({
+        let mut c = caps::Capabilities::unrestricted();
+        let _ = c.pledge(caps::CAP_STDIO | caps::CAP_EXEC);
+        c
+    });
+    match unsafe { process::spawn_elf(&elf::TEST_ELF_EMBER, 0) } {
+        Ok(pid) => {
+            serial_println!("[ember] PID {} arrancado — preemption real activada de forma permanente", pid);
+            preempt::set_enabled(true);
+            for _ in 0..4 {
+                scheduler::yield_now();
+            }
+            serial_println!("[ember] PID 1 vivo de fondo — el resto del arranque sigue con normalidad");
+        }
+        Err(e) => serial_println!("[ember] fallo al arrancar: {} (el resto del arranque sigue igualmente)", e),
+    }
 
     serial_println!("");
     serial_println!("Boot completo — entrando en la consola de depuración.");

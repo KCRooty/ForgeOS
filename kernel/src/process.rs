@@ -156,9 +156,10 @@ fn launch_trampoline() -> ! {
 
 /// Da de alta y arranca un proceso nuevo desde cero (no un `fork()`)
 /// como tarea del scheduler. Pensado para el primer proceso de una
-/// demo de consola (`forktest`, `exec`) — el camino normal de un
-/// sistema real es que todo proceso nazca de `fork()`+`execve()` desde
-/// `Ember` (init, PID 1), que todavía no existe.
+/// demo de consola (`forktest`, `exec`) o para el arranque automático
+/// de `Ember` (PID 1) desde `main.rs` — el camino normal de un sistema
+/// real, una vez Ember pueda lanzar servicios reales, es que todo lo
+/// demás nazca de `fork()`+`execve()` desde él, no de aquí.
 pub unsafe fn spawn_process(entry_point: u64, user_stack_top: u64, page_table: u64, parent_pid: u64) -> u64 {
     let pid = alloc_pid();
     register(pid, parent_pid, page_table);
@@ -166,4 +167,23 @@ pub unsafe fn spawn_process(entry_point: u64, user_stack_top: u64, page_table: u
     LAUNCH_STACK = user_stack_top;
     crate::scheduler::spawn_with_space(launch_trampoline, page_table, pid);
     pid
+}
+
+/// Carga un ELF64 desde `bytes`, le monta una pila de usuario, y lo
+/// arranca como proceso real (`spawn_process`). Núcleo compartido entre
+/// `console::launch_elf` (comandos de la consola, con mensajes de error
+/// hacia el puerto serie) y el arranque automático de Ember en
+/// `main.rs` (sin puerto al que escribir, solo `serial_println!`) —
+/// antes duplicado en `console.rs`, movido aquí para que ambos usen
+/// exactamente el mismo camino en vez de dos copias que podrían
+/// divergir con el tiempo.
+pub unsafe fn spawn_elf(bytes: &[u8], parent_pid: u64) -> Result<u64, &'static str> {
+    let loaded = crate::elf::load(bytes)?;
+
+    let stack_phys = crate::pmm::alloc_frame().ok_or("sin memoria para la pila de usuario")?;
+    let user_stack_virt: u64 = 0x0000_0090_0000_0000; // 576 GiB, privado del proceso
+    crate::mmu::map_page_in(loaded.page_table, user_stack_virt, stack_phys, true, false)?;
+    let user_stack_top = user_stack_virt + 4096;
+
+    Ok(spawn_process(loaded.entry_point, user_stack_top, loaded.page_table, parent_pid))
 }
