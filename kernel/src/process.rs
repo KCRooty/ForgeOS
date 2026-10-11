@@ -251,51 +251,68 @@ pub unsafe fn spawn_process(entry_point: u64, user_stack_top: u64, page_table: u
     pid
 }
 
-/// Número de qwords del frame mínimo que `write_initial_stack_frame`
-/// escribe — ver su comentario.
-const INITIAL_STACK_FRAME_QWORDS: u64 = 5;
+// Tamaño total reservado al final de la página para el frame inicial más
+// el string del nombre del proceso: 10 qwords (80 bytes) + 8 bytes de
+// padding para alineación 16 + 8 bytes para el string "forge\0" = 96 bytes.
+// Con `stack_virt_top` page-aligned (múltiplo de 4096), `stack_virt_top - 96`
+// es también múltiplo de 16 — alineación correcta para SysV ABI x86_64.
+const INITIAL_STACK_FRAME_SIZE: u64 = 96;
 
-/// Escribe, en la cima de la pila de usuario recién mapeada, el frame
-/// mínimo que un `crt0` real (convención SysV x86_64) espera encontrar
-/// al arrancar: `argc` en `[rsp]`, seguido del array `argv[]` terminado
-/// en `NULL`, `envp[]` terminado en `NULL`, y `auxv[]` terminado en
-/// `AT_NULL` (`{0,0}`) — M8b, primer paso hacia poder compilar un
-/// `crt0` de verdad contra esta ABI. De momento siempre "0 argumentos,
-/// sin entorno, sin auxv real": ni `spawn_elf` ni `execve()` aceptan
-/// todavía pasar `argv`/`envp` de verdad (eso es el siguiente paso,
-/// cuando algún binario real los necesite) — lo que importa AHORA es
-/// que la FORMA de la pila ya sea la correcta, para que un `_start`
-/// que lea `[rsp]` como `argc` no encuentre basura sin sentido.
+/// Escribe el frame inicial completo SysV x86_64 (M8f) en la cima de la
+/// pila de usuario. Layout desde el RSP inicial (stack_virt_top - 96):
 ///
-/// `stack_phys` es la física de la página (accesible directamente,
-/// identity-mapeada — mismo supuesto que ya usa el resto de `mmu.rs`/
-/// `pmm.rs` con toda la RAM dentro de los 4 GiB de QEMU en esta
-/// sesión); `stack_virt_top` es la cima virtual de esa misma página
-/// (`stack_virt + 4096`). Devuelve el RSP inicial ya ajustado —
-/// apuntando a `argc`, con toda la página menos 40 bytes todavía libre
-/// por debajo para el uso normal de pila del proceso.
-unsafe fn write_initial_stack_frame(stack_phys: u64, stack_virt_top: u64) -> u64 {
-    let frame_phys = stack_phys + 4096 - INITIAL_STACK_FRAME_QWORDS * 8;
-    let words = frame_phys as *mut u64;
+///   [rsp+  0]  argc          = 1
+///   [rsp+  8]  argv[0]       = ptr a "forge\0" (stack_virt_top - 8)
+///   [rsp+ 16]  argv[1]       = NULL
+///   [rsp+ 24]  envp[0]       = NULL
+///   [rsp+ 32]  AT_PAGESZ (6) / 4096
+///   [rsp+ 48]  AT_ENTRY  (9) / entry_point
+///   [rsp+ 64]  AT_NULL   (0) / 0
+///   [rsp+ 80]  padding (8 bytes)
+///   [rsp+ 88]  "forge\0\0" (string del nombre, 8 bytes)
+///
+/// mlibc necesita AT_PAGESZ para su allocator y AT_ENTRY para dlinfo.
+/// `entry` es el punto de entrada del ELF cargado (rellenado por `load()`).
+unsafe fn write_initial_stack_frame(stack_phys: u64, stack_virt_top: u64, entry: u64) -> u64 {
+    // String "forge\0" en los últimos 8 bytes de la zona reservada
+    let str_phys = stack_phys + 4096 - 8;
     unsafe {
-        words.add(0).write(0); // argc = 0
-        words.add(1).write(0); // argv[0] = NULL (fin de argv, sin argumentos)
-        words.add(2).write(0); // envp[0] = NULL (fin de envp, sin entorno)
-        words.add(3).write(0); // auxv[0].a_type = AT_NULL
-        words.add(4).write(0); // auxv[0].a_val
+        let s = str_phys as *mut u8;
+        s.write(b'f'); s.add(1).write(b'o'); s.add(2).write(b'r');
+        s.add(3).write(b'g'); s.add(4).write(b'e'); s.add(5).write(0);
+        s.add(6).write(0); s.add(7).write(0);
     }
-    stack_virt_top - INITIAL_STACK_FRAME_QWORDS * 8
+    let argv0_virt = stack_virt_top - 8;
+
+    // 10 qwords del frame empezando en stack_phys + 4096 - 96
+    let frame_phys = stack_phys + 4096 - INITIAL_STACK_FRAME_SIZE;
+    let w = frame_phys as *mut u64;
+    unsafe {
+        w.add(0).write(1);          // argc
+        w.add(1).write(argv0_virt); // argv[0]
+        w.add(2).write(0);          // argv NULL term
+        w.add(3).write(0);          // envp NULL term
+        w.add(4).write(6);          // AT_PAGESZ
+        w.add(5).write(4096);
+        w.add(6).write(9);          // AT_ENTRY
+        w.add(7).write(entry);
+        w.add(8).write(0);          // AT_NULL
+        w.add(9).write(0);
+        // w.add(10): padding = 0 (ya cero de alloc_frame)
+    }
+    stack_virt_top - INITIAL_STACK_FRAME_SIZE
 }
 
 /// Mapea una pila de usuario nueva de una página, con el frame inicial
 /// de `write_initial_stack_frame` ya escrito — núcleo compartido entre
 /// `spawn_elf` y `syscall::sys_execve` (los dos únicos sitios donde un
 /// proceso "arranca de cero" de verdad, a diferencia de `fork()`, que
-/// reanuda la pila YA EXISTENTE del padre).
-pub unsafe fn map_fresh_user_stack(page_table: u64, stack_virt: u64) -> Result<u64, &'static str> {
+/// reanuda la pila YA EXISTENTE del padre). `entry` es el punto de
+/// entrada del ELF (necesario para AT_ENTRY en el auxv).
+pub unsafe fn map_fresh_user_stack(page_table: u64, stack_virt: u64, entry: u64) -> Result<u64, &'static str> {
     let stack_phys = crate::pmm::alloc_frame().ok_or("sin memoria para la pila de usuario")?;
     crate::mmu::map_page_in(page_table, stack_virt, stack_phys, true, false)?;
-    Ok(unsafe { write_initial_stack_frame(stack_phys, stack_virt + 4096) })
+    Ok(unsafe { write_initial_stack_frame(stack_phys, stack_virt + 4096, entry) })
 }
 
 /// Carga un ELF64 desde `bytes`, le monta una pila de usuario, y lo
@@ -310,7 +327,7 @@ pub unsafe fn spawn_elf(bytes: &[u8], parent_pid: u64) -> Result<u64, &'static s
     let loaded = crate::elf::load(bytes)?;
 
     let user_stack_virt: u64 = 0x0000_0090_0000_0000; // 576 GiB, privado del proceso
-    let user_stack_top = unsafe { map_fresh_user_stack(loaded.page_table, user_stack_virt) }?;
+    let user_stack_top = unsafe { map_fresh_user_stack(loaded.page_table, user_stack_virt, loaded.entry_point) }?;
 
     Ok(spawn_process(loaded.entry_point, user_stack_top, loaded.page_table, parent_pid))
 }

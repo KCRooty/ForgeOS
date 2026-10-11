@@ -975,7 +975,7 @@ fn sys_execve(frame: &SyscallFrame) -> u64 {
     // `auxv`, ver su comentario en `process.rs`) — antes esta función
     // mapeaba la página a mano y usaba `user_stack_virt + 4096` tal
     // cual como RSP; ahora comparte el mismo camino que `spawn_elf`.
-    let user_stack_top = match unsafe { process::map_fresh_user_stack(loaded.page_table, user_stack_virt) } {
+    let user_stack_top = match unsafe { process::map_fresh_user_stack(loaded.page_table, user_stack_virt, loaded.entry_point) } {
         Ok(top) => top,
         Err(e) => {
             serial_println!("[syscall] execve: fallo mapeando la pila de usuario: {}", e);
