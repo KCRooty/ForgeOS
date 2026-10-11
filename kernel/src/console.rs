@@ -79,7 +79,7 @@ fn dispatch(port: &mut SerialPort, line: &str) {
         "help" => {
             let _ = write!(
                 port,
-                "comandos: help, meminfo, caps, bp, panic, fb, pci, ahci, net, ping, disktest, partinfo, ls, cat, write, ext2ls, ext2cat, ring3test, synccalltest, synccalldeny, forktest, waittest, exec, ember, preempttest, preempttest3, segvtest, killtest, posixtest, crt0test, ps\r\n"
+                "comandos: help, meminfo, caps, bp, panic, fb, pci, ahci, net, ping, disktest, partinfo, ls, cat, write, ext2ls, ext2cat, ring3test, synccalltest, synccalldeny, forktest, waittest, exec, ember, preempttest, preempttest3, segvtest, killtest, posixtest, crt0test, hellotest, ps\r\n"
             );
         }
         "synccalltest" => {
@@ -202,6 +202,7 @@ fn dispatch(port: &mut SerialPort, line: &str) {
         "killtest" => run_kill_test(port),
         "posixtest" => run_posix_test(port),
         "crt0test" => run_crt0_test(port),
+        "hellotest" => run_hello_test(port),
         "ps" => {
             let _ = write!(port, "PID  PPID  ESTADO\r\n");
             for p in process::list() {
@@ -809,4 +810,18 @@ fn run_caps_demo(port: &mut SerialPort) {
         "enforce NET (no pledgeado) permitido = {}\r\n",
         c.enforce(caps::CAP_NET).is_ok()
     );
+}
+
+/// M9 — primer programa de usuario real: hello-world compilado con NASM+ld.lld.
+/// Demuestra ARCH_PRCTL/TLS + SYS_WRITE + SYS_EXIT desde código de usuario real.
+fn run_hello_test(port: &mut SerialPort) {
+    let _ = write!(port, "arrancando hello-world M9...\r\n");
+    caps::set_current(caps::Capabilities::unrestricted());
+    if let Some(pid) = launch_elf(port, &elf::TEST_ELF_HELLO, 0) {
+        let _ = write!(port, "PID {} arrancado — cediendo turno...\r\n", pid);
+        for _ in 0..5 {
+            scheduler::yield_now();
+        }
+        let _ = write!(port, "de vuelta en la consola.\r\n");
+    }
 }
