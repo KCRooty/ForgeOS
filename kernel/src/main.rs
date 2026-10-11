@@ -35,6 +35,7 @@ mod psf;
 mod ring3;
 mod rtl8139;
 mod syscall;
+mod tls;
 mod vfs;
 mod scheduler;
 mod serial;

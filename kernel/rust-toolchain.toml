@@ -4,5 +4,5 @@
 # entre nightlies sin aviso — pin explícito para que el build sea
 # reproducible. Sube la fecha a mano cuando quieras probar una nightly
 # más reciente, revisando el target spec si algo rompe.
-channel = "nightly-2026-07-01"
+channel = "nightly-2026-10-10"
 components = ["rust-src"]

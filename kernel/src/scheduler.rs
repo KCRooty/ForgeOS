@@ -6,6 +6,7 @@
 //! `yield_now()` por su cuenta.
 
 use crate::task::{Context, Task, TaskState};
+use crate::tls;
 use alloc::vec::Vec;
 use core::cell::UnsafeCell;
 
@@ -269,6 +270,22 @@ pub fn yield_now() {
         // Igual que CR3 y la pila de syscalls: `current_pid()` debe
         // reflejar quién corre AHORA, no quién arrancó primero.
         crate::process::set_current_pid(sched.tasks[next_idx].pid);
+
+        // FS.base: save del proceso que sale, restore del que entra.
+        // Sin esto, mlibc (que apunta su TCB via FS:0) leería el TCB
+        // de otro proceso y corrompería silenciosamente su propia memoria.
+        let old_pid = sched.tasks[old_idx].pid;
+        if old_pid != 0 {
+            let fs = tls::read_fs_base();
+            crate::process::with_pid_mut(old_pid, |pcb| pcb.fs_base = fs);
+        }
+        let next_pid = sched.tasks[next_idx].pid;
+        let next_fs = if next_pid != 0 {
+            crate::process::find(next_pid).map(|p| p.fs_base).unwrap_or(0)
+        } else {
+            0
+        };
+        tls::write_fs_base(next_fs);
 
         let old_ctx: *mut Context = &mut sched.tasks[old_idx].context;
         let new_ctx: *const Context = &sched.tasks[next_idx].context;

@@ -25,6 +25,7 @@ use crate::scheduler;
 use crate::serial::SerialPort;
 use crate::serial_println;
 use crate::signal;
+use crate::tls;
 use crate::vfs;
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -87,11 +88,27 @@ pub const SYS_EXECVE: u64 = 59;
 pub const SYS_EXIT: u64 = 60;
 pub const SYS_WAIT: u64 = 61; // == wait4 en Linux x86_64; no hay "wait" clásica en esa ABI
 pub const SYS_KILL: u64 = 62;
+// Syscalls que mlibc necesita en su secuencia de arranque — M8c.
+pub const SYS_RT_SIGPROCMASK: u64 = 14;   // stub — señales no implementadas aún
+pub const SYS_ARCH_PRCTL: u64 = 158;      // ARCH_SET_FS/ARCH_GET_FS — TLS para mlibc
+pub const SYS_FUTEX: u64 = 202;           // stub — single-threaded, sin bloqueo real
+pub const SYS_SET_TID_ADDRESS: u64 = 218; // mlibc init; devuelve PID como TID
 
 /// Flag de `mmap()` que de verdad comprobamos — el resto de bits reales
 /// de Linux (`MAP_PRIVATE`, `MAP_FIXED`...) no aplican: solo existe
 /// mapeo anónimo (sin fichero detrás), ver `sys_mmap`.
 pub const MAP_ANONYMOUS: u64 = 0x20;
+
+/// Subcomandos de `arch_prctl()` que soportamos — el resto devuelve EINVAL.
+pub const ARCH_SET_FS: u64 = 0x1002;
+pub const ARCH_GET_FS: u64 = 0x1003;
+
+/// Código de error POSIX compacto — todos los stubs lo usan cuando no
+/// soportan la operación pedida, para no devolver u64::MAX (que es un
+/// número arbitrario en el espacio del usuario) sino el -ENOSYS real de
+/// Linux (38 en negativo, como i64, interpretado como u64).
+const ENOSYS: u64 = (-38i64) as u64;
+const EINVAL: u64 = (-22i64) as u64;
 
 /// Flag de `open()` para pedir escritura — el resto de bits de Linux
 /// (`O_CREAT`, `O_TRUNC`...) no aplican todavía: `sys_open` siempre
@@ -267,6 +284,10 @@ extern "C" fn syscall_dispatch(frame: *mut SyscallFrame) -> u64 {
         SYS_EXIT => sys_exit(frame),
         SYS_WAIT => sys_wait(frame),
         SYS_KILL => sys_kill(frame),
+        SYS_RT_SIGPROCMASK => sys_rt_sigprocmask(frame),
+        SYS_ARCH_PRCTL => sys_arch_prctl(frame),
+        SYS_FUTEX => sys_futex(frame),
+        SYS_SET_TID_ADDRESS => sys_set_tid_address(frame),
         other => {
             serial_println!("[syscall] número desconocido: {}", other);
             u64::MAX
@@ -739,6 +760,86 @@ fn sys_brk(frame: &SyscallFrame) -> u64 {
         p.heap_mapped_end = new_mapped_end;
     });
     requested
+}
+
+/// `arch_prctl(code, addr)` — M8c. Solo ARCH_SET_FS y ARCH_GET_FS.
+///
+/// `ARCH_SET_FS` es la syscall que mlibc llama para fijar su TCB: escribe
+/// `arg1` (la dirección del TCB en el espacio de usuario) en el MSR
+/// IA32_FS_BASE, y también lo guarda en el PCB para que el context switch
+/// lo restaure cuando otra tarea le quite el turno y se lo devuelva.
+/// Sin esto, cualquier función de mlibc que acceda a `%fs:0` obtiene
+/// la dirección del TCB del último proceso que corrió — corrupción
+/// silenciosa garantizada.
+fn sys_arch_prctl(frame: &SyscallFrame) -> u64 {
+    let code = frame.arg0;
+    let addr = frame.arg1;
+    let pid = process::current_pid();
+
+    match code {
+        ARCH_SET_FS => {
+            tls::write_fs_base(addr);
+            process::with_pid_mut(pid, |pcb| pcb.fs_base = addr);
+            serial_println!("[syscall] arch_prctl: ARCH_SET_FS PID {} -> FS.base=0x{:x}", pid, addr);
+            0
+        }
+        ARCH_GET_FS => {
+            let fs = tls::read_fs_base();
+            // Escribe la dirección en el puntero de usuario que pasó `arg1`.
+            unsafe { *(addr as *mut u64) = fs };
+            0
+        }
+        _ => {
+            serial_println!("[syscall] arch_prctl: código desconocido 0x{:x}", code);
+            EINVAL
+        }
+    }
+}
+
+/// `set_tid_address(tidptr)` — M8c, stub para mlibc init.
+///
+/// mlibc llama a esto nada más arrancar para registrar un puntero donde
+/// el kernel escribirá el TID al hacer exit() (para FUTEX_WAKE_OP). En
+/// este kernel sin hilos reales, simplemente guardamos el puntero en el
+/// PCB y devolvemos el PID como TID — es lo que mlibc espera recibir y
+/// lo que usará como `__thread_self->tid`.
+fn sys_set_tid_address(frame: &SyscallFrame) -> u64 {
+    let tidptr = frame.arg0;
+    let pid = process::current_pid();
+    process::with_pid_mut(pid, |pcb| pcb.tid_ptr = tidptr);
+    pid // TID = PID en un kernel sin threading
+}
+
+/// `rt_sigprocmask(how, set, oldset, sigsetsize)` — M8c, stub.
+///
+/// mlibc lo llama al init para bloquear señales durante operaciones
+/// críticas. Este kernel tiene señales básicas (signal.rs) pero sin
+/// máscara por proceso todavía. Devolver 0 (éxito sin hacer nada) es
+/// correcto: si no hay señales pendientes, enmascarar/desenmascarar es
+/// un no-op observable y mlibc continúa sin problema.
+fn sys_rt_sigprocmask(_frame: &SyscallFrame) -> u64 {
+    0 // éxito, sin máscara real todavía
+}
+
+/// `futex(uaddr, op, val, ...)` — M8c, stub single-threaded.
+///
+/// mlibc usa FUTEX para su mutex interno en libc. En un kernel sin hilos
+/// reales:
+/// - FUTEX_WAIT / FUTEX_WAIT_PRIVATE: si `*uaddr == val` devolver 0
+///   (fingir que ya fue despertado inmediatamente) — sin bloquearse de
+///   verdad, que en single-threaded sería un deadlock seguro.
+/// - FUTEX_WAKE / FUTEX_WAKE_PRIVATE: devolver 0 (0 waiters despertados).
+/// - Cualquier otra operación: ENOSYS.
+fn sys_futex(frame: &SyscallFrame) -> u64 {
+    let op = frame.arg1 & 0x7F; // quitar FUTEX_PRIVATE_FLAG (bit 7)
+    match op {
+        0 /* FUTEX_WAIT */ => 0,
+        1 /* FUTEX_WAKE */ => 0,
+        _ => {
+            serial_println!("[syscall] futex: op={} no soportado (single-threaded stub)", op);
+            ENOSYS
+        }
+    }
 }
 
 /// `execve()` — reemplaza el proceso actual por un binario nuevo.
