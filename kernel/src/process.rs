@@ -86,6 +86,17 @@ pub struct Pcb {
     /// propósito, mismo espíritu que `heap_top` nunca desmapeando de
     /// verdad). Cada mapeo nuevo empieza donde acabó el anterior.
     pub mmap_next: u64,
+    /// FS.base del proceso — guardado en cada context switch fuera,
+    /// restaurado al volver. mlibc lo usa para el TCB (Thread Control
+    /// Block): es lo primero que lee en cualquier función de libc, a
+    /// través de `%fs:0`. Empieza en 0 (sin TCB) hasta que el proceso
+    /// llama a `SYS_ARCH_PRCTL(ARCH_SET_FS, ptr)`.
+    pub fs_base: u64,
+    /// Puntero de usuario guardado por `SYS_SET_TID_ADDRESS` — mlibc lo
+    /// llama al init, espera que devolvamos el TID (= PID en este kernel,
+    /// sin hilos). Se guarda por si algún día hace falta FUTEX_WAKE_OP
+    /// al hacer exit(); de momento no se usa de verdad.
+    pub tid_ptr: u64,
 }
 
 static NEXT_PID: AtomicU64 = AtomicU64::new(1);
@@ -123,6 +134,8 @@ pub fn register(pid: u64, parent_pid: u64, page_table: u64) {
             heap_top: HEAP_BASE,
             heap_mapped_end: HEAP_BASE,
             mmap_next: MMAP_BASE,
+            fs_base: 0,
+            tid_ptr: 0,
         });
     }
 }
