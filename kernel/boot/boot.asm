@@ -8,6 +8,18 @@
 
 bits 32
 
+; ── Xen PVH ELF note ─────────────────────────────────────────────────────────
+; QEMU 11+ requiere un note XEN_ELFNOTE_PHYS32_ENTRY (type=18) en un segmento
+; PT_NOTE del ELF para arrancar el kernel con -kernel sin pasar por GRUB.
+; GRUB ignora esta sección y usa el header Multiboot2 de más abajo.
+section .note.Xen
+align 4
+    dd 4               ; namesz = 4 ("Xen\0")
+    dd 4               ; descsz = 4 (dirección 32-bit del entry point)
+    dd 18              ; type = XEN_ELFNOTE_PHYS32_ENTRY
+    db "Xen", 0        ; name
+    dd _start_pvh      ; valor: entry point físico de 32 bits para PVH
+
 section .multiboot2
 align 8
 mb2_header_start:
@@ -50,6 +62,7 @@ stack_top:
 
 section .boot.text
 global _start
+global _start_pvh
 extern kernel_main_upper   ; símbolo Rust: fn kernel_main_upper(mb2_ptr: u64) -> !
 
 _start:
@@ -57,6 +70,23 @@ _start:
     mov edi, ebx            ; puntero a la info Multiboot2 (arg del kernel)
 
     call check_multiboot
+    call check_cpuid
+    call check_long_mode
+
+    call setup_page_tables
+    call enable_paging
+
+    lgdt [gdt64.pointer]
+    jmp gdt64.code:long_mode_start
+
+; Entry point para QEMU PVH (Xen HVM protocol):
+; QEMU 11+ llega aquí directamente (modo protegido 32-bit, sin paginación).
+; No hay magic de Multiboot2 en EAX, así que omitimos check_multiboot.
+; Pasamos EDI=0 para que kernel_main_upper sepa que no hay info Multiboot2.
+_start_pvh:
+    mov esp, stack_top
+    xor edi, edi            ; mb2_ptr = 0 — sin info Multiboot2 en modo PVH
+
     call check_cpuid
     call check_long_mode
 
