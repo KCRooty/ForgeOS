@@ -88,6 +88,7 @@ pub const SYS_EXECVE: u64 = 59;
 pub const SYS_EXIT: u64 = 60;
 pub const SYS_WAIT: u64 = 61; // == wait4 en Linux x86_64; no hay "wait" clásica en esa ABI
 pub const SYS_KILL: u64 = 62;
+pub const SYS_FSTAT: u64 = 5;             // M8d — fstat(fd, *stat)
 // Syscalls que mlibc necesita en su secuencia de arranque — M8c.
 pub const SYS_RT_SIGPROCMASK: u64 = 14;   // stub — señales no implementadas aún
 pub const SYS_ARCH_PRCTL: u64 = 158;      // ARCH_SET_FS/ARCH_GET_FS — TLS para mlibc
@@ -109,6 +110,7 @@ pub const ARCH_GET_FS: u64 = 0x1003;
 /// Linux (38 en negativo, como i64, interpretado como u64).
 const ENOSYS: u64 = (-38i64) as u64;
 const EINVAL: u64 = (-22i64) as u64;
+const EBADF: u64 = (-9i64) as u64;
 
 /// Flag de `open()` para pedir escritura — el resto de bits de Linux
 /// (`O_CREAT`, `O_TRUNC`...) no aplican todavía: `sys_open` siempre
@@ -284,6 +286,7 @@ extern "C" fn syscall_dispatch(frame: *mut SyscallFrame) -> u64 {
         SYS_EXIT => sys_exit(frame),
         SYS_WAIT => sys_wait(frame),
         SYS_KILL => sys_kill(frame),
+        SYS_FSTAT => sys_fstat(frame),
         SYS_RT_SIGPROCMASK => sys_rt_sigprocmask(frame),
         SYS_ARCH_PRCTL => sys_arch_prctl(frame),
         SYS_FUTEX => sys_futex(frame),
@@ -840,6 +843,88 @@ fn sys_futex(frame: &SyscallFrame) -> u64 {
             ENOSYS
         }
     }
+}
+
+/// `struct stat` de Linux x86_64 — layout idéntico al que usa mlibc en sus
+/// sysdeps Linux. 144 bytes, `repr(C)` obligatorio para que el proceso de
+/// usuario lea los campos en las posiciones que espera.
+#[repr(C)]
+struct Stat {
+    st_dev:        u64,      // 0
+    st_ino:        u64,      // 8
+    st_nlink:      u64,      // 16
+    st_mode:       u32,      // 24 — S_IFREG (0x8000) o S_IFCHR (0x2000) + permisos
+    st_uid:        u32,      // 28
+    st_gid:        u32,      // 32
+    __pad0:        u32,      // 36
+    st_rdev:       u64,      // 40
+    st_size:       i64,      // 48
+    st_blksize:    i64,      // 56
+    st_blocks:     i64,      // 64 — bloques de 512 bytes
+    st_atime:      u64,      // 72
+    st_atime_nsec: u64,      // 80
+    st_mtime:      u64,      // 88
+    st_mtime_nsec: u64,      // 96
+    st_ctime:      u64,      // 104
+    st_ctime_nsec: u64,      // 112
+    __unused:      [i64; 3], // 120
+}
+
+/// `fstat(fd, statbuf)` — M8d. Rellena un `struct stat` en el espacio de
+/// usuario con metadatos del fd abierto. No hay inodes reales ni timestamps —
+/// lo que mlibc necesita en el arranque es `st_mode` (tipo de fichero) y
+/// `st_size` (tamaño para `lseek()` interno).
+///
+/// fd 0/1/2 → S_IFCHR (terminal/serie), size 0.
+/// fd >= 3  → S_IFREG, size = bytes acumulados en el FdEntry.
+fn sys_fstat(frame: &SyscallFrame) -> u64 {
+    let fd = frame.arg0;
+    let stat_ptr = frame.arg1 as *mut Stat;
+
+    if stat_ptr.is_null() {
+        return EINVAL;
+    }
+
+    let (mode, size): (u32, i64) = match fd {
+        0 | 1 | 2 => (0x2000 | 0o666, 0), // S_IFCHR | rw-rw-rw-
+        _ => {
+            let pid = process::current_pid();
+            let index = (fd as usize).wrapping_sub(3);
+            let result = process::with_pid_mut(pid, |pcb| match pcb.fds.get(index) {
+                Some(Some(FdEntry::ReadFile { data, .. })) => Some((0x8000u32 | 0o644, data.len() as i64)),
+                Some(Some(FdEntry::WriteFile { data, .. })) => Some((0x8000u32 | 0o644, data.len() as i64)),
+                _ => None,
+            });
+            match result.flatten() {
+                Some(v) => v,
+                None => return EBADF,
+            }
+        }
+    };
+
+    let stat = Stat {
+        st_dev: 1,
+        st_ino: fd + 1,
+        st_nlink: 1,
+        st_mode: mode,
+        st_uid: 0,
+        st_gid: 0,
+        __pad0: 0,
+        st_rdev: 0,
+        st_size: size,
+        st_blksize: 4096,
+        st_blocks: (size + 511) / 512,
+        st_atime: 0,
+        st_atime_nsec: 0,
+        st_mtime: 0,
+        st_mtime_nsec: 0,
+        st_ctime: 0,
+        st_ctime_nsec: 0,
+        __unused: [0; 3],
+    };
+    unsafe { stat_ptr.write(stat) };
+    serial_println!("[syscall] fstat: fd={} mode=0o{:o} size={}", fd, mode, size);
+    0
 }
 
 /// `execve()` — reemplaza el proceso actual por un binario nuevo.
