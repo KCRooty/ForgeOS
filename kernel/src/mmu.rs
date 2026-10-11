@@ -365,6 +365,25 @@ pub unsafe fn translate(p4: u64, virt: u64) -> Option<u64> {
     Some((leaf_entry & ADDR_MASK) + (virt & 0xFFF))
 }
 
+/// Añade el bit PAGE_WRITABLE a la PTE leaf de `virt` en `p4`.
+/// No hace nada si la página no está mapeada. Necesario cuando dos
+/// segmentos PT_LOAD de un ELF comparten una página y el segundo tiene
+/// PF_W mientras el primero fue mapeado sin escritura.
+pub unsafe fn mark_writable_in(p4: u64, virt: u64) {
+    let p3_entry = *((p4 + (table_index(virt, 3) as u64) * 8) as *const u64);
+    if p3_entry & PAGE_PRESENT == 0 { return; }
+    let p3 = p3_entry & ADDR_MASK;
+    let p2_entry = *((p3 + (table_index(virt, 2) as u64) * 8) as *const u64);
+    if p2_entry & PAGE_PRESENT == 0 { return; }
+    let p2 = p2_entry & ADDR_MASK;
+    let p1_entry = *((p2 + (table_index(virt, 1) as u64) * 8) as *const u64);
+    if p1_entry & PAGE_PRESENT == 0 { return; }
+    let p1 = p1_entry & ADDR_MASK;
+    let leaf_ptr = (p1 + (table_index(virt, 0) as u64) * 8) as *mut u64;
+    *leaf_ptr |= PAGE_WRITABLE;
+    flush_tlb_entry(virt);
+}
+
 /// Desmapea una página de 4 KiB previamente mapeada con `map_page`.
 /// No libera el frame físico — eso es responsabilidad del llamante
 /// (vía `pmm::free_frame`) si corresponde.
