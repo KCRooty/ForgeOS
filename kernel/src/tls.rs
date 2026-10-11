@@ -13,6 +13,35 @@
 
 const IA32_FS_BASE: u32 = 0xC000_0100;
 
+/// Área de 512 bytes para `fxsave`/`fxrstor` — alineación a 16 bytes
+/// requerida por la instrucción. Guarda el estado completo de la FPU x87,
+/// MMX y XMM0-XMM15 + MXCSR de una tarea.
+#[repr(C, align(16))]
+#[derive(Clone, Copy)]
+pub struct FxState(pub [u8; 512]);
+
+impl FxState {
+    pub const fn new() -> Self {
+        FxState([0; 512])
+    }
+}
+
+/// Guarda el estado FPU/SSE actual en `dst` (debe ser 16-byte aligned).
+pub unsafe fn fxsave(dst: *mut FxState) {
+    core::arch::asm!("fxsave64 [{}]", in(reg) dst, options(nostack, preserves_flags));
+}
+
+/// Restaura el estado FPU/SSE desde `src`.
+pub unsafe fn fxrstor(src: *const FxState) {
+    core::arch::asm!("fxrstor64 [{}]", in(reg) src, options(nostack, preserves_flags));
+}
+
+/// Reinicia la FPU al estado por defecto (`finit`) — para tareas nuevas
+/// que nunca han tenido un estado FPU guardado.
+pub unsafe fn fpu_init() {
+    core::arch::asm!("finit", options(nostack, preserves_flags));
+}
+
 /// Lee el FS.base actual del procesador.
 pub fn read_fs_base() -> u64 {
     let (hi, lo): (u32, u32);
