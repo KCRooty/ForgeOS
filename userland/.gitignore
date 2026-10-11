@@ -1,0 +1,5 @@
+*.o
+*.elf
+hello_elf_bytes.txt
+build/
+
