@@ -13,6 +13,7 @@
 //! `#[unsafe(naked)]`). Si esto no compila tal cual, es el PRIMER sitio
 //! a mirar — más incluso que la ABI de idt.rs.
 
+use crate::tls::FxState;
 use alloc::boxed::Box;
 use core::arch::naked_asm;
 
@@ -86,6 +87,14 @@ pub struct Task {
     /// hacía su propia syscall mientras la primera seguía "pausada"
     /// dentro de la suya, la pila compartida quedaba pisada.
     pub kernel_stack_top: u64,
+    /// Estado FPU/SSE — 512 bytes guardados con `fxsave` al ceder el turno
+    /// y restaurados con `fxrstor` al retomarlo. Solo para tareas de proceso
+    /// real (pid != 0); el código de kernel usa soft-float y no toca XMM.
+    pub fxstate: FxState,
+    /// `true` una vez que `fxsave` ha escrito un estado válido aquí.
+    /// Las tareas nuevas arrancan con `false` → se hace `finit` en vez de
+    /// `fxrstor` para no restaurar los 512 bytes a cero.
+    pub fpu_saved: bool,
     // guardamos los Box para que el kernel heap no libere las pilas
     // mientras la tarea exista. `None` para la tarea "placeholder" que
     // representa un flujo de ejecución que YA estaba corriendo (el
@@ -143,6 +152,8 @@ impl Task {
             page_table: 0,
             pid: 0,
             kernel_stack_top,
+            fxstate: FxState::new(),
+            fpu_saved: false,
             _stack: Some(stack),
             _kernel_stack: Some(kernel_stack),
         }
@@ -161,6 +172,8 @@ impl Task {
             page_table: 0,
             pid: 0,
             kernel_stack_top: 0,
+            fxstate: FxState::new(),
+            fpu_saved: false,
             _stack: None,
             _kernel_stack: None,
         }

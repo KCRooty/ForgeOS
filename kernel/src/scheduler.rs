@@ -287,6 +287,23 @@ pub fn yield_now() {
         };
         tls::write_fs_base(next_fs);
 
+        // FPU/SSE (M8e): save del proceso que sale, restore/init del que entra.
+        // Solo para tareas de proceso real (pid != 0) — kernel usa soft-float.
+        // `old_pid` y `next_pid` ya definidos en el bloque FS.base de arriba.
+        if old_pid != 0 {
+            let fxptr = &mut sched.tasks[old_idx].fxstate as *mut _;
+            crate::tls::fxsave(fxptr);
+            sched.tasks[old_idx].fpu_saved = true;
+        }
+        if next_pid != 0 {
+            if sched.tasks[next_idx].fpu_saved {
+                let fxptr = &sched.tasks[next_idx].fxstate as *const _;
+                crate::tls::fxrstor(fxptr);
+            } else {
+                crate::tls::fpu_init();
+            }
+        }
+
         let old_ctx: *mut Context = &mut sched.tasks[old_idx].context;
         let new_ctx: *const Context = &sched.tasks[next_idx].context;
 
