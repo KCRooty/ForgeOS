@@ -41,15 +41,27 @@ fn is_used(frame: usize) -> bool {
 /// Multiboot2 original sin modificar.
 pub unsafe fn init(mb2_ptr: u64) {
     // 1. Libera lo que el firmware confirma como RAM disponible.
-    mb2::for_each_memory_region(mb2_ptr, |base, len, kind| {
-        if kind == mb2::MEM_AVAILABLE {
-            let start_frame = (base / FRAME_SIZE) as usize;
-            let frame_count = (len / FRAME_SIZE) as usize;
-            for f in start_frame..(start_frame + frame_count).min(MAX_FRAMES) {
-                set_free(f);
-            }
+    if mb2_ptr == 0 {
+        // Modo PVH (QEMU -kernel sin GRUB): no hay info Multiboot2.
+        // Asumimos layout estándar de QEMU con -m 256M:
+        //   1 MiB (0x100000) – 240 MiB (0xF000000) disponibles.
+        // El paso 2 de abajo reserva de todas formas el primer MiB + kernel.
+        let start = (0x0010_0000u64 / FRAME_SIZE) as usize;
+        let end   = (0x0F00_0000u64 / FRAME_SIZE) as usize;
+        for f in start..end.min(MAX_FRAMES) {
+            set_free(f);
         }
-    });
+    } else {
+        mb2::for_each_memory_region(mb2_ptr, |base, len, kind| {
+            if kind == mb2::MEM_AVAILABLE {
+                let start_frame = (base / FRAME_SIZE) as usize;
+                let frame_count = (len / FRAME_SIZE) as usize;
+                for f in start_frame..(start_frame + frame_count).min(MAX_FRAMES) {
+                    set_free(f);
+                }
+            }
+        });
+    }
 
     // 2. Reserva de nuevo el primer MiB completo y toda la imagen del
     //    kernel — sin importar lo que diga el mapa de memoria.

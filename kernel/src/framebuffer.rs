@@ -37,6 +37,9 @@ static mut FB: Option<Framebuffer> = None;
 /// # Safety
 /// Debe llamarse una sola vez, con el puntero Multiboot2 original.
 pub unsafe fn init(mb2_ptr: u64) {
+    if mb2_ptr == 0 {
+        return; // Modo PVH: sin info Multiboot2, framebuffer no disponible.
+    }
     let total_size = *(mb2_ptr as *const u32);
     let end = mb2_ptr + total_size as u64;
     let mut addr = mb2_ptr + 8;

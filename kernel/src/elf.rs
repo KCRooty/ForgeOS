@@ -116,7 +116,19 @@ fn load_segment(page_table: u64, bytes: &[u8], ph: &Elf64ProgramHeader) -> Resul
         let phys = pmm::alloc_frame().ok_or("sin memoria física para el segmento")?;
         unsafe {
             core::ptr::write_bytes(phys as *mut u8, 0, 4096);
-            mmu::map_page_in(page_table, page_virt, phys, writable, executable)?;
+            match mmu::map_page_in(page_table, page_virt, phys, writable, executable) {
+                Ok(()) => {}
+                Err("ya había una página mapeada en esa dirección virtual") => {
+                    // Dos segmentos PT_LOAD del mismo ELF comparten esta página.
+                    // El frame recién allocado no se usará — liberarlo para no leakearlo.
+                    pmm::free_frame(phys);
+                    // Si este segmento necesita escritura, actualizar la PTE existente.
+                    if writable {
+                        mmu::mark_writable_in(page_table, page_virt);
+                    }
+                }
+                Err(e) => return Err(e),
+            }
         }
     }
 
