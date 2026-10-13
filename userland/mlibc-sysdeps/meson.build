@@ -1,11 +1,18 @@
-# meson.build para los sysdeps de ForgeOS en mlibc.
-# Colocar este directorio en: <mlibc-src>/sysdeps/forgeos/
-# y añadir 'forgeos' a la lista de OSes en mlibc/meson.build.
-#
-# Desde CachyOS (requiere meson, ninja, clang con target x86_64-elf):
-#   git clone https://github.com/managarm/mlibc
-#   cp -r <este-directorio>/* mlibc/sysdeps/forgeos/
-#   meson setup build --cross-file cross/x86_64-forgeos.txt -Dheaders_only=false
-#   ninja -C build
+# meson.build para los sysdeps de ForgeOS en mlibc v7+.
+# Colocar en: <mlibc-src>/sysdeps/forgeos/meson.build
 
-rtlib_src += files('forgeos/generic.cpp')
+sysdep_supported_options = {}
+
+# Headers propios de ForgeOS (sysdeps.hpp) + abi-bits del demo (compatible con ForgeOS)
+rtld_include_dirs += include_directories('include')
+libc_include_dirs += include_directories('include')
+rtld_include_dirs += include_directories('../demo/include')
+libc_include_dirs += include_directories('../demo/include')
+
+rtld_sources += files(
+    'generic.cpp',
+)
+
+libc_sources += files(
+    'generic.cpp',
+)

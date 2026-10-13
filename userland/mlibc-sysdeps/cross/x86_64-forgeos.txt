@@ -16,14 +16,18 @@ pkgconfig = 'pkg-config'
 c_args   = ['-target', 'x86_64-elf',
             '-ffreestanding', '-fno-stack-protector',
             '-mno-red-zone', '-fno-pic',
-            '-nostdinc', '-nostdlib']
+            '-nostdinc', '-nostdlib',
+            '-D_GNU_SOURCE',
+            '-I/usr/lib/llvm-19/lib/clang/19/include']
 cpp_args = ['-target', 'x86_64-elf',
             '-ffreestanding', '-fno-stack-protector',
             '-mno-red-zone', '-fno-pic',
             '-nostdinc', '-nostdlib',
-            '-fno-rtti', '-fno-exceptions']
-c_link_args   = ['-target', 'x86_64-elf', '-nostdlib', '-fuse-ld=lld']
-cpp_link_args = ['-target', 'x86_64-elf', '-nostdlib', '-fuse-ld=lld']
+            '-fno-rtti', '-fno-exceptions',
+            '-D_GNU_SOURCE',
+            '-I/usr/lib/llvm-19/lib/clang/19/include']
+c_link_args   = ['-target', 'x86_64-elf', '-nostdlib', '-fuse-ld=lld', '-rtlib=compiler-rt']
+cpp_link_args = ['-target', 'x86_64-elf', '-nostdlib', '-fuse-ld=lld', '-rtlib=compiler-rt']
 
 [host_machine]
 system     = 'forgeos'
