@@ -825,3 +825,21 @@ fn run_hello_test(port: &mut SerialPort) {
         let _ = write!(port, "de vuelta en la consola.\r\n");
     }
 }
+
+/// Auto-ejecuta el hello-world M9 una vez al arrancar el kernel — para
+/// verificación headless en QEMU sin necesitar input interactivo.
+/// Llamar desde main.rs justo antes de `console::run()`.
+pub fn autorun_hello_test() {
+    let mut port = SerialPort::init();
+    let _ = write!(port, "[autorun] lanzando hellotest M9...\r\n");
+    caps::set_current(caps::Capabilities::unrestricted());
+    if let Some(pid) = launch_elf(&mut port, &elf::TEST_ELF_HELLO, 0) {
+        let _ = write!(port, "[autorun] PID {} arrancado\r\n", pid);
+        for _ in 0..10 {
+            scheduler::yield_now();
+        }
+        let _ = write!(port, "[autorun] hellotest terminado\r\n");
+    } else {
+        let _ = write!(port, "[autorun] fallo al lanzar hello.elf\r\n");
+    }
+}

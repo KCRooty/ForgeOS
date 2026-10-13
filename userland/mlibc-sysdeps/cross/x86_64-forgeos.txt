@@ -1,0 +1,32 @@
+# meson cross-file para ForgeOS (x86_64 bare-metal / ELF)
+# Lugar: mlibc/cross/x86_64-forgeos.txt
+# Uso:   meson setup build --cross-file cross/x86_64-forgeos.txt
+
+[binaries]
+c       = 'clang'
+cpp     = 'clang++'
+ar      = 'llvm-ar'
+nm      = 'nm'
+strip   = 'llvm-strip'
+objcopy = 'llvm-objcopy'
+ld      = 'ld.lld'
+pkgconfig = 'pkg-config'
+
+[built-in options]
+c_args   = ['-target', 'x86_64-elf',
+            '-ffreestanding', '-fno-stack-protector',
+            '-mno-red-zone', '-fno-pic',
+            '-nostdinc', '-nostdlib']
+cpp_args = ['-target', 'x86_64-elf',
+            '-ffreestanding', '-fno-stack-protector',
+            '-mno-red-zone', '-fno-pic',
+            '-nostdinc', '-nostdlib',
+            '-fno-rtti', '-fno-exceptions']
+c_link_args   = ['-target', 'x86_64-elf', '-nostdlib', '-fuse-ld=lld']
+cpp_link_args = ['-target', 'x86_64-elf', '-nostdlib', '-fuse-ld=lld']
+
+[host_machine]
+system     = 'forgeos'
+cpu_family = 'x86_64'
+cpu        = 'x86_64'
+endian     = 'little'

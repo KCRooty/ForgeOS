@@ -353,6 +353,8 @@ pub extern "C" fn kernel_main_upper(mb2_info_ptr: u64) -> ! {
 
     serial_println!("");
     serial_println!("Boot completo — entrando en la consola de depuración.");
+    // M9: verificación automática del hello-world en QEMU headless
+    console::autorun_hello_test();
     console::run()
 }
 
