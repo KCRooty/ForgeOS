@@ -1,4 +1,8 @@
+<img src="assets/logo.png" alt="Forge OS" width="96" height="96">
+
 # Forge OS
+
+**Página del proyecto:** [staticforge.me/forge-os](https://staticforge.me/forge-os/)
 
 Kernel monolítico x86_64 en Rust, bare-metal, con filosofía híbrida:
 - **Linux**: ABI de syscalls numeradas x86_64, ecosistema de drivers como referencia
