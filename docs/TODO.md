@@ -4,14 +4,14 @@ Organizado por capa. ✅ = ya construido (aunque sin verificar en QEMU,
 salvo que se indique lo contrario). Todo lo demás falta. Esto es el
 inventario completo, no una selección.
 
-**Actualización — primer boot real (Claude Code, sobre este repo):**
+**Actualización — primer boot real (sobre este repo):**
 el kernel compila y arranca de verdad en QEMU por primera vez. Llega
 hasta la consola de depuración (`forge>`) con MMU, espacio de
 direcciones por proceso (CR3 real), VFS y pipes confirmados
 funcionando, no solo revisados por lectura.
 
 **Actualización — `process.rs`, fork/execve/exit/getpid reales
-(Claude Code, verificado en QEMU):** reconstruidos desde cero (el zip
+(verificado en QEMU):** reconstruidos desde cero (el zip
 `fork-execve` original no llegó a recuperarse) y verificados de
 extremo a extremo con los comandos de consola `forktest`/`exec`/`ps`:
 `fork()` clona el espacio de direcciones de verdad (copia profunda,
@@ -49,8 +49,7 @@ esta sesión):
   `elf.rs` sobre por qué cualquier dirección por debajo de 512 GiB
   (`1<<39`) es, en la práctica, compartida entre todos los procesos.
 
-**Actualización — `wait()` real + liberación de memoria (Claude Code,
-verificado en QEMU):** ver sección 2 más abajo. Tres bugs más
+**Actualización — `wait()` real + liberación de memoria (verificado en QEMU):** ver sección 2 más abajo. Tres bugs más
 encontrados al implementarlo, todos preexistentes:
 
 - **Pila de kernel única compartida entre TODOS los procesos**
@@ -79,8 +78,7 @@ encontrados al implementarlo, todos preexistentes:
   compartida original tampoco tenía esta garantía (ahora con
   `#[repr(align(16))]` explícito, por si acaso).
 
-**Actualización — red funcional de extremo a extremo (Claude Code,
-verificado en QEMU):** milestones `m5-netrx` y `m6-ping` reconstruidos
+**Actualización — red funcional de extremo a extremo (verificado en QEMU):** milestones `m5-netrx` y `m6-ping` reconstruidos
 desde cero (mismo caso que `fork-execve`: los zips originales no
 llegaron a recuperarse) y verificados con el comando de consola `ping`,
 que hace un ARP request + ICMP echo request reales contra el gateway de
@@ -113,7 +111,7 @@ en `tools/run-qemu.sh`, que ahora siempre pasa esa flag explícita en
 vez de confiar en el modelo por defecto de la instalación de QEMU de
 turno.
 
-**Actualización — Ember, primer boceto de PID 1 (Claude Code, verificado
+**Actualización — Ember, primer boceto de PID 1 (verificado
 en QEMU):** modelo rc.d de FreeBSD (secuencial, cada servicio termina
 del todo antes del siguiente — no paralelo tipo systemd). `TEST_ELF_EMBER`
 (`elf.rs`) arranca dos "servicios" (`ember-svc0`/`ember-svc1`, hoy
@@ -152,7 +150,7 @@ dirección virtual"`). `ember` es el primer caso real que ejercita esto
 (dos rondas de `execve()` en el mismo proceso). Movido a
 `0x0000_00C0_0000_0000` (768 GiB, índice P4 = 1, genuinamente privado).
 
-**Actualización — ext2 real de solo lectura (Claude Code, verificado en
+**Actualización — ext2 real de solo lectura (verificado en
 QEMU contra un ext2 de verdad):** `ext2.rs` (nuevo) monta un ext2
 clásico (rev1, sin extents/64bit/metadata_csum — eso es ext4), resuelve
 rutas absolutas, lista directorios y lee ficheros completos con
@@ -188,7 +186,7 @@ milestone aparte); solo lectura, sin journal (ext3/ext4 real de verdad
 es aparte).
 
 **Actualización — `partinfo.rs`, escáner GPT/MBR + detección de
-filesystem (Claude Code, verificado en QEMU contra tablas de
+filesystem (verificado en QEMU contra tablas de
 particiones y filesystems reales):** lee MBR clásico o GPT (detecta
 GPT vía el MBR protector, tipo 0xEE), y para cada partición identifica
 el filesystem por firma real en su contenido — no por el byte de tipo
@@ -215,8 +213,7 @@ tiene tabla de particiones (sector 0 a ceros). Arreglado añadiendo
 `-boot order=d` a `tools/run-qemu.sh` — fuerza arrancar del CD-ROM
 siempre, sin importar qué disco SATA esté adjunto.
 
-**Actualización — `preempt.rs`, preemption real vía timer APIC (Claude
-Code, verificado en QEMU):** el timer de M4b llevaba disparando desde
+**Actualización — `preempt.rs`, preemption real vía timer APIC (verificado en QEMU):** el timer de M4b llevaba disparando desde
 el primer arranque, pero su handler original solo contaba ticks y
 mandaba EOI — nunca tocaba el scheduler. Ahora `preempt::timer_entry`
 (trampolín en ensamblador desnudo, mismo patrón que `syscall_entry` en
@@ -271,8 +268,7 @@ verdad necesita un `RSP0` por tarea primero, pieza aparte — hasta
 entonces, Ember sigue sin poder quedarse viva para siempre de forma
 segura (ver su propia nota).
 
-**Actualización — señales: SIGKILL/SIGTERM/SIGSEGV (Claude Code,
-verificado en QEMU) — último punto pendiente del TODO original de esta
+**Actualización — señales: SIGKILL/SIGTERM/SIGSEGV (verificado en QEMU) — último punto pendiente del TODO original de esta
 reconstrucción.** Alcance a propósito acotado: solo la acción por
 defecto de cada señal (terminar el proceso) — nadie puede instalar un
 manejador propio todavía, eso necesita una máscara de señales
@@ -329,8 +325,7 @@ interrupciones enmascaradas para siempre (viva de mentira: ya había
 impreso el prompt, pero el `hlt` de `read_line()` no despertaba nunca
 más).
 
-**Actualización — preemption real también en ring 3 (Claude Code,
-verificado en QEMU):** cierra el hueco que `preempt.rs` había dejado a
+**Actualización — preemption real también en ring 3 (verificado en QEMU):** cierra el hueco que `preempt.rs` había dejado a
 propósito abierto. `gdt::set_rsp0` (nuevo) hace `TSS.RSP0` per-tarea —
 `scheduler::yield_now()` lo activa con el mismo valor que ya usa
 `Task::kernel_stack_top` para la pila de syscalls (seguro compartirlo:
@@ -362,7 +357,7 @@ en cuanto se tomara. Pieza aparte, con esa consecuencia que resolver
 primero (o aceptar).
 
 **Actualización — Ember ya se queda viva para siempre de verdad
-(Claude Code, verificado en QEMU):** decisión tomada. `task_a`/`task_b`
+(verificado en QEMU):** decisión tomada. `task_a`/`task_b`
 (M4a) se arreglaron para terminar de verdad tras sus 3 vueltas
 (`scheduler::mark_current_finished()` + un último `yield_now()`, mismo
 patrón que `sys_exit()`) en vez de repetir para siempre — antes daba
@@ -397,8 +392,7 @@ se queda entonces parada para siempre en `running` sin avanzar más
 (inofensivo: no cuelga nada ni corrompe memoria, simplemente deja de
 recibir turno). `preempt::set_enabled(true)` a mano lo restaura.
 
-**Actualización — Ember arranca automáticamente (Claude Code,
-verificado en QEMU):** hasta ahora Ember solo arrancaba a demanda desde
+**Actualización — Ember arranca automáticamente (verificado en QEMU):** hasta ahora Ember solo arrancaba a demanda desde
 el comando `ember` de la consola — un "PID 1" que hacía falta pedir a
 mano no es un init real. `main.rs` ahora la arranca ella sola, justo
 después de `syscall::init()` (necesita VFS y syscalls ya listos) y
@@ -427,7 +421,7 @@ completo", y una batería larga después (`forktest`, `ps`, `segvtest`,
 la preemption real activa desde el primer instante en que hay consola.
 
 **Actualización — bug real de corrupción intermitente en el arranque
-de Ember, encontrado y arreglado (Claude Code, verificado en QEMU con
+de Ember, encontrado y arreglado (verificado en QEMU con
 15+ arranques repetidos):** arrancando la ISO desde cero en bucle
 (scripted, no a mano) salía mal aproximadamente 1 de cada 2-3 veces —
 Ember, tras lanzar y `execve`ar su primer servicio (`ember-svc0`),
@@ -496,7 +490,7 @@ regresión completa después de cada uno (`forktest`, `waittest`,
 `meminfo`, `ps`) sin ninguna regresión.
 
 **Actualización — segundo bug real, introducido por el propio fix
-anterior (Claude Code, verificado en QEMU): `IrqGuard` dejaba
+anterior (verificado en QEMU): `IrqGuard` dejaba
 `preempttest` colgado PARA SIEMPRE.** No es el mismo bug que el de
 arriba (ese era `execve`/CR3, ya arreglado) — este lo introdujo el
 propio `scheduler::IrqGuard` de ese mismo fix, y es más grave: no
@@ -548,7 +542,7 @@ paralelo, + 5 de la propia batería) sin ningún fallo del bug de
 `execve`/CR3 tampoco — los dos arreglos son compatibles entre sí.
 
 **Actualización — M8: `read()`/`write()`/`open()`/`close()`/`brk()`
-reales, primer paso POSIX hacia mlibc (Claude Code, verificado en
+reales, primer paso POSIX hacia mlibc (verificado en
 QEMU):** con el TODO original de la reconstrucción completo y los dos
 bugs de concurrencia de arriba ya cerrados, el siguiente bloque grande
 elegido fue mlibc + Bellows (sección 6). Antes de tocar mlibc en sí,
@@ -610,7 +604,7 @@ lineal), y sobre todo escribir el sysdeps de mlibc contra ESTA ABI
 concreta — trabajo de otra sesión, mlibc es un proyecto en sí mismo.
 
 **Actualización — M8b: `mmap()`/`munmap()` reales + pila inicial de
-`crt0` (Claude Code, verificado en QEMU):** segunda mitad del paso
+`crt0` (verificado en QEMU):** segunda mitad del paso
 POSIX hacia mlibc, completando lo que M8 dejó pendiente.
 
 - `Pcb.mmap_next` (arena que solo crece, mismo espíritu que
@@ -669,7 +663,7 @@ para aceptarlos.
 ## 0. Reconstrucción pendiente (importado desde el histórico de chat)
 
 Este repo se importó a partir de 37 snapshots de desarrollo pasados desde
-Claude web (ver `docs/MEGADOC.md` para el documento maestro completo). El
+el historial de chat (ver `docs/MEGADOC.md` para el documento maestro completo). El
 propio megadoc (v1.2) documenta milestones posteriores al último snapshot
 que se pudo importar (`rtl8139-tx`) para los que no llegó a recuperarse el
 zip correspondiente. `process.rs` y fork/execve/exit/getpid (milestone

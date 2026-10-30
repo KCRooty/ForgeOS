@@ -32,7 +32,7 @@ CLI. Es una lista larga y genuinamente útil.
 
 ### Qué NO se puede portar, por mucho que se quiera
 
-- **Discord, Spotify, Steam (cliente), Claude Code**: binarios cerrados
+- **Discord, Spotify, Steam (cliente)**: binarios cerrados
   o dependientes de Electron/Node completo. No hay fuente que portar.
 - **Navegadores reales (Chromium/Firefox)**: la fuente existe, pero son
   el software más complejo del mundo — millones de líneas asumiendo

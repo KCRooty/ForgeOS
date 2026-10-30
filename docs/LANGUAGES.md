@@ -2,7 +2,7 @@
 
 ## Las dos cosas distintas que "lenguaje nativo" puede significar
 
-1. **Compilación cruzada** — escribes en tu PC (Claude Code, VS Code),
+1. **Compilación cruzada** — escribes en tu PC (VS Code),
    compilas apuntando al target de Forge OS, el binario corre en Forge
    OS. **Ya funciona hoy** para cualquier lenguaje cuyo compilador
    soporte targets `no_std`/freestanding personalizados (Rust, C, C++,

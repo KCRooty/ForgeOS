@@ -552,7 +552,7 @@ Ver `TODO.md` — es el documento vivo, se mantiene aparte de este megadoc.
 | Campo | Valor |
 |---|---|
 | **PC de desarrollo** | AMD Ryzen 5 5600 + RTX 3060 Ti / Windows 11 |
-| **IDE** | VS Code + Claude Code CLI |
+| **IDE** | VS Code |
 | **Toolchain** | Rust nightly, target `x86_64-forge` custom |
 | **Emulador** | QEMU (`run-qemu.sh`) |
 | **Build** | `build.sh` → crea ISO con GRUB |
