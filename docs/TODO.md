@@ -658,6 +658,98 @@ ABI concreta (mlibc es un proyecto en sí mismo, no una tarde), y
 cuando haga falta pasar `argv`/`envp` de verdad, extender `execve()`
 para aceptarlos.
 
+**Actualización — M8c a M10, resumen (verificado en QEMU; el detalle
+está en el historial de git):** `SYS_ARCH_PRCTL` + FS.base por proceso
+(TLS), `SET_TID_ADDRESS`/`RT_SIGPROCMASK`/`FUTEX` como stubs de un solo
+hilo, `SYS_FSTAT`, estado FPU guardado por tarea (`fxsave`/`fxrstor`) y
+el frame inicial completo `argc`/`argv`/`auxv` (M8c-M8f); primer
+programa de usuario de verdad, `userland/hello.asm`, más arranque por
+PVH con `qemu -kernel` (M9); y los sysdeps de mlibc v7 para Forge OS,
+compilando la biblioteca entera (M10).
+
+**Actualización — M11: primer programa en C con mlibc, cargado desde
+disco (verificado en QEMU con 15 arranques en frío de la batería
+completa):** `run /bin/hello` lee un ELF estático de 800 KiB de un ext2
+real, lo ejecuta en ring 3 y recoge su código de salida. `printf` con
+coma flotante, `malloc`, `qsort`, `setjmp`, `fopen`/`fseek` sobre el
+VFS... — `userland/c/libctest.c` son 35 comprobaciones contra
+resultados conocidos, todas en verde.
+
+Lo que hizo falta, de fuera a dentro:
+
+- **Userland reproducible.** `userland/mlibc-sysdeps/build-mlibc.sh`
+  clona mlibc en un commit fijado, instala los sysdeps (ahora con
+  `crt1.S` y `entry.cpp` propios — M10 compilaba la biblioteca pero no
+  tenía punto de entrada con el que enlazar nada) y deja un sysroot en
+  `userland/sysroot/`. `make -C userland` compila los programas de
+  `userland/c/`; `tools/make-test-disk.sh` los copia a `/bin` del disco.
+  El código va en PIC: los binarios viven en 640 GiB, fuera del alcance
+  de las reubicaciones absolutas de 32 bits con las que M10 compilaba.
+- **Consola:** `run <ruta> [args...] [&]` (primer plano o segundo plano,
+  con `argv` real) y `wait`.
+- **Kernel:** `SYS_LSEEK`; SSE habilitado para ring 3 (CR4.OSFXSR — sin
+  él la primera instrucción SSE de cualquier binario C es un #UD); pila
+  de usuario de 256 KiB en vez de 4; `mmap()` entrega páginas a cero;
+  ext2 con indirecto doble (ficheros de hasta ~64 MiB con bloque de
+  1 KiB); #DE/#UD/#GP desde ring 3 matan al proceso (SIGFPE/SIGILL/
+  SIGSEGV) en vez de colgar el sistema; los registros se ponen a cero al
+  entrar en ring 3 (antes el proceso recibía restos de registros del
+  kernel).
+- **Heap del kernel con lista libre (M2b).** El bump allocator de 1 MiB
+  sin `free` se agotaba con solo leer el binario del disco. Ahora:
+  8 MiB, first-fit, fusión de bloques contiguos, estadísticas en
+  `meminfo` y autoprueba en el arranque.
+- **Pruebas automáticas.** `tools/qemu-console.py` maneja la consola por
+  el puerto serie esperando al prompt; `tools/smoke-test.sh [N]` pasa
+  la batería entera (todos los `*test` de la consola + los programas en
+  C + fallos provocados) y comprueba la salida, N arranques seguidos.
+
+Bugs reales que destapó — ninguno de ellos visible con los binarios de
+prueba en ensamblador, todos preexistentes:
+
+1. **Una syscall que cedía el turno volvía a ring 3 con el RSP de otro
+   proceso.** `syscall_entry` guardaba el RSP de usuario en un único
+   global y lo restauraba de ahí al salir; si la syscall cedía el turno
+   a medias (`wait()`), la syscall de cualquier otro proceso lo pisaba.
+   Los tests en ensamblador no usan la pila después de `wait()`. Ahora
+   el RSP viaja en la pila de kernel de cada tarea
+   (`SyscallFrame::user_rsp`). De paso, la pila queda alineada a 16 en
+   la llamada a `syscall_dispatch` (antes entraba desalineada).
+2. **El cargador ELF dejaba sin permiso de ejecución el principio de
+   `.text`** cuando compartía página con el final de `.rodata` — lo
+   normal en la salida de un enlazador real. Solo propagaba la escritura
+   entre segmentos solapados; ahora une todos los permisos
+   (`mmu::add_permissions_in`).
+3. **Cada línea de log del kernel podía comerse lo que se estuviera
+   tecleando.** `serial_println!` reprogramaba la UART entera en cada
+   llamada, vaciado de la FIFO de recepción incluido. Ahora el chip se
+   inicializa una vez, y la recepción va por IRQ4 a una cola de 256
+   bytes (antes: sondeo, con 16 bytes de margen mientras la consola no
+   tuviera turno).
+4. **`mmu::free_address_space` podía liberar el PML4 activo.** Las
+   tareas de kernel corren sobre el CR3 de quien tuvo el turno antes; la
+   consola, al recoger el proceso que acababa de lanzar, seguía sobre
+   sus tablas. Ahora se cambia antes al PML4 del kernel (`KERNEL_P4`).
+5. **Fugas de memoria:** 32 KiB de heap por cada proceso que hubiera
+   existido (las tareas `Finished` nunca salían de la cola del
+   scheduler), 12 KiB de memoria física por cada comando que tocara el
+   disco (`ahci::first_disk` volvía a montar el puerto cada vez), y el
+   espacio de direcciones anterior entero en cada `execve()`. Con todo
+   arreglado, 40 `run /bin/hello` seguidos dejan `meminfo` exactamente
+   igual que antes del primero.
+6. **`execve()` no reiniciaba el heap del proceso** (`heap_mapped_end`
+   seguía apuntando a páginas del espacio anterior).
+7. **`crt0test` llevaba roto desde M8f** (esperaba el frame de pila
+   antiguo). Reescrito con la fuente en el repo
+   (`userland/crt0test.asm`).
+
+**Limitaciones documentadas a propósito:** mlibc se compila solo con la
+parte ANSI C — la opción POSIX (`fork`/`exec`/`stat`/directorios/señales
+desde C) necesita más sysdeps y, en el kernel, lo que se lista abajo.
+`abort()` acaba en pánico de mlibc (código 255) por la misma razón.
+`execve()` sigue sin leer el `argv` de su llamante. `SYS_WRITE` sigue
+siendo 63.
+
 ---
 
 ## 0. Reconstrucción pendiente (importado desde el histórico de chat)
@@ -704,7 +796,9 @@ zip correspondiente. `process.rs` y fork/execve/exit/getpid (milestone
 - ✅ Allocador físico de páginas (bitmap)
 - ✅ Heap del kernel (bump allocator v1, sin free real)
 - ✅ Framebuffer + texto básico
-- ❌ **Heap real con free-list** (M2b, ya anotado)
+- ✅ **Heap real con free-list (M2b)** *verificado en QEMU* — 8 MiB,
+  first-fit con fusión de bloques, autoprueba en el arranque; ver
+  actualización M11 arriba
 - ✅ **APIC local** *borrador sin verificar* — habilitado, timer
   periódico armado (`apic.rs`), primera activación real de
   interrupciones (`sti`) en todo el kernel, vector 0x40 registrado en
@@ -859,6 +953,19 @@ zip correspondiente. `process.rs` y fork/execve/exit/getpid (milestone
   el sysdeps de mlibc contra esta ABI en sí, y `argv`/`envp` reales
   cuando algún binario los necesite (la FORMA de la pila ya es
   correcta, ver `crt0` en sección 6).
+- ✅ **`lseek()` (`SYS_LSEEK`=8), `argv` real al arrancar un proceso,
+  y excepciones de ring 3 como señales (M11)** *verificado en QEMU* —
+  ver actualización M11 arriba.
+- ❌ **Acceso validado a memoria de usuario** (`copy_from_user`/
+  `copy_to_user`) — hoy toda syscall se fía del puntero que le pasan:
+  uno malo es un fallo de página en ring 0, es decir, el kernel entero
+  parado. Bloquea leer `argv`/`envp` en `execve()` y es lo primero que
+  hay que cerrar antes de ejecutar nada que no sea de confianza.
+- ❌ **`fork()` completo** — el hijo solo hereda `rip`/`rsp`/`rflags`/
+  `rax`; un `fork()` desde C necesita todos los registros (y el estado
+  FPU) del padre.
+- ❌ **Paginación bajo demanda / pila que crece** — la pila de usuario
+  son 256 KiB fijos mapeados al arrancar.
 
 ## 3. Filesystem (M5)
 
@@ -950,23 +1057,20 @@ zip correspondiente. `process.rs` y fork/execve/exit/getpid (milestone
 
 ## 6. Userland, toolchain y shell
 
-- ✅ **crt0 — pila inicial (M8b)** *verificado en QEMU* — el frame
-  `argc`/`argv`/`envp`/`auxv` que un `_start` real leería ya es
-  correcto (`process::write_initial_stack_frame`), ver actualización
-  M8b arriba. **Pendiente:** que `spawn_elf`/`execve()` acepten
-  `argv`/`envp` de VERDAD (hoy siempre "0 argumentos, sin entorno") —
-  la forma ya está, falta rellenarla cuando algún binario real los
-  necesite.
-- ❌ **libc** — **decisión revisada:** en vez de escribir la nuestra
-  desde cero, portar **mlibc** (libc pensada para OSes nuevos, con capa
-  de abstracción por sistema; es lo que usa BoredOS). Convierte portar
-  software de "meses por programa" a "cambios menores". Ver
-  `COMPATIBILITY.md`. **Base de syscalls ya lista (M8+M8b, sección 2):**
-  `read`/`write`/`open`/`close`/`brk`/`mmap`/`munmap` reales y
-  verificados, más una pila inicial compatible con `crt0` — lo único
-  que falta es escribir el sysdeps de mlibc contra esta ABI en sí
-  (proyecto propio, otra sesión) y, cuando haga falta, `argv`/`envp`
-  reales (ver el punto de `crt0` arriba).
+- ✅ **crt0 — pila inicial (M8b, M8f, M11)** *verificado en QEMU* — el
+  frame `argc`/`argv`/`envp`/`auxv` que lee `_start`
+  (`process::write_initial_stack_frame`), con `argv` real desde M11
+  (`run /bin/prog a b c`). **Pendiente:** variables de entorno (`envp`
+  siempre vacío) y que `execve()` lea el `argv` de su llamante.
+- ✅ **libc — mlibc portada, parte ANSI C (M10 + M11)** *verificado en
+  QEMU* — en vez de escribir la nuestra desde cero: mlibc (libc pensada
+  para OSes nuevos, con capa de abstracción por sistema; es lo que usa
+  BoredOS). Sysdeps en `userland/mlibc-sysdeps/`, binarios estáticos.
+  Ver `COMPATIBILITY.md` y la actualización M11 arriba. **Pendiente:**
+  la opción POSIX de mlibc (más sysdeps + lo listado en la sección 2),
+  `SYS_CLOCK_GETTIME` (necesita reloj: RTC o timer calibrado, sección
+  1), stdin real (hoy `read(0)` devuelve EOF) y enlazado dinámico
+  (`libc.so` + `ld.so`, que piden `mmap()` de fichero).
 - ❌ **~50-60 coreutils** — `ls`, `cat`, `cp`, `mv`, `rm`, `ps`, `top`,
   etc. (referencia directa: los coreutils de nyxos-dev)
 - ❌ **Bellows** (el shell real, M4+) — pipelines, redirección, job
@@ -1028,7 +1132,9 @@ zip correspondiente. `process.rs` y fork/execve/exit/getpid (milestone
 ## 10. Estabilidad y QA
 
 - ❌ **Batería de tests KAT en CI** — principio ya escrito en
-  `PHILOSOPHY.md`, pero no hay ni un solo test automatizado todavía
+  `PHILOSOPHY.md`. **Primer paso dado (M11):** `tools/smoke-test.sh`
+  pasa toda la batería en QEMU y comprueba la salida, pero a mano —
+  falta ejecutarla en CI en cada push
 - ❌ **Tracing/observabilidad en vivo** (equivalente mínimo a
   perf/ftrace) — hueco que no habíamos ni mencionado. Sin esto, un bug
   de *rendimiento* (no de correctitud, que sí cazan los KATs) no tiene

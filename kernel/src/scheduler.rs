@@ -219,6 +219,30 @@ pub fn yield_now() {
             None => return,
         };
 
+        // Recoge las tareas terminadas: suelta su `Task` y, con él, sus
+        // dos pilas de 16 KiB (la propia y la de syscalls/interrupciones).
+        // Antes se quedaban en la cola para siempre — 32 KiB perdidos por
+        // cada proceso que hubiera existido alguna vez.
+        //
+        // Es seguro justo aquí y solo para tareas que NO son la actual:
+        // con una sola CPU, una tarea `Finished` que no está corriendo
+        // está aparcada en `switch_to` y nunca volverá a recibir turno,
+        // así que nadie más pisa sus pilas. La actual, aunque ya esté
+        // marcada `Finished` (`exit()` cediendo el turno por última vez),
+        // sigue ejecutando sobre la suya: se recoge en el `yield_now()`
+        // siguiente, ya desde otra tarea.
+        let mut i = 0;
+        while i < sched.tasks.len() {
+            if i != sched.current && sched.tasks[i].state == TaskState::Finished {
+                sched.tasks.remove(i);
+                if i < sched.current {
+                    sched.current -= 1;
+                }
+            } else {
+                i += 1;
+            }
+        }
+
         if sched.tasks.len() < 2 {
             return;
         }

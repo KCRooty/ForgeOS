@@ -41,6 +41,22 @@ debugfs -w -R "write $STAGE/hello.txt hello.txt" "$IMG" > /dev/null
 debugfs -w -R "write $STAGE/big.bin big.bin" "$IMG" > /dev/null
 debugfs -w -R "write $STAGE/sub/nested.txt /sub/nested.txt" "$IMG" > /dev/null
 
+# Programas de usuario (C + mlibc) -> /bin, si están compilados
+# (`make -C userland`, ver userland/Makefile). Cada uno ronda los 800 KiB:
+# con bloque de 1 KiB eso pasa de sobra de los 268 bloques que cubren los
+# punteros directos + el indirecto simple, así que además ejercitan el
+# indirecto doble de ext2.rs. Desde la consola: `run /bin/hello`.
+debugfs -w -R "mkdir /bin" "$IMG" > /dev/null
+shopt -s nullglob
+for prog in "$ROOT"/userland/build/*; do
+    name="$(basename "$prog")"
+    case "$name" in *.o|*.elf|*.txt) continue ;; esac
+    [ -f "$prog" ] || continue
+    debugfs -w -R "write $prog /bin/$name" "$IMG" > /dev/null
+    echo "      /bin/$name ($(stat -c %s "$prog") bytes)"
+done
+shopt -u nullglob
+
 echo ""
 echo "Listo: $IMG"
 echo "Arranca con red+disco: ./tools/run-qemu.sh (ya lo adjunta si existe)"

@@ -88,6 +88,7 @@ pub const SYS_EXECVE: u64 = 59;
 pub const SYS_EXIT: u64 = 60;
 pub const SYS_WAIT: u64 = 61; // == wait4 en Linux x86_64; no hay "wait" clásica en esa ABI
 pub const SYS_KILL: u64 = 62;
+pub const SYS_LSEEK: u64 = 8;             // M11 — lseek(fd, offset, whence)
 pub const SYS_FSTAT: u64 = 5;             // M8d — fstat(fd, *stat)
 // Syscalls que mlibc necesita en su secuencia de arranque — M8c.
 pub const SYS_RT_SIGPROCMASK: u64 = 14;   // stub — señales no implementadas aún
@@ -110,7 +111,9 @@ pub const ARCH_GET_FS: u64 = 0x1003;
 /// Linux (38 en negativo, como i64, interpretado como u64).
 const ENOSYS: u64 = (-38i64) as u64;
 const EINVAL: u64 = (-22i64) as u64;
+const ENOENT: u64 = (-2i64) as u64;
 const EBADF: u64 = (-9i64) as u64;
+const ESPIPE: u64 = (-29i64) as u64;
 
 /// Flag de `open()` para pedir escritura — el resto de bits de Linux
 /// (`O_CREAT`, `O_TRUNC`...) no aplican todavía: `sys_open` siempre
@@ -140,6 +143,9 @@ pub struct SyscallFrame {
     pub arg5: u64,
     pub user_rflags: u64,
     pub user_rip: u64,
+    /// RSP de usuario en el momento del `syscall`, guardado en la pila
+    /// de kernel de ESTA tarea — ver `syscall_entry`.
+    pub user_rsp: u64,
 }
 
 /// Handoff para el hijo de `fork()` — el mismo patrón de "slot global
@@ -191,15 +197,24 @@ pub fn init() {
 /// primero que hacemos es cambiar a una pila de kernel conocida antes
 /// de tocar nada más.
 ///
-/// Limitación conocida de esta pasada: `USER_RSP_SCRATCH` es una única
-/// variable global — no es reentrante ni SMP-safe. Válido mientras solo
-/// haya una syscall en vuelo a la vez (nuestro caso actual, sin
-/// preemption ni multi-core todavía).
+/// `USER_RSP_SCRATCH` es una única variable global, pero solo hace de
+/// puente durante las dos primeras instrucciones (con IF=0 por FMASK,
+/// nada puede colarse en medio): el RSP de usuario se copia enseguida a
+/// la pila de kernel de la tarea (`push [user_rsp]`), y a la vuelta se
+/// recupera de AHÍ (`pop rsp`), no del global.
+///
+/// Antes se restauraba del global, y eso era un bug real aunque latente:
+/// una syscall que cede el turno a medias (`wait()`) dejaba pasar a otro
+/// proceso, cuya propia syscall pisaba el global — y al reanudarse, la
+/// primera volvía a ring 3 con el RSP DEL OTRO proceso. Los binarios de
+/// prueba en ensamblador no lo notaban porque no usan la pila después de
+/// `wait()`; cualquier programa en C sí.
 #[unsafe(naked)]
 pub unsafe extern "C" fn syscall_entry() {
     core::arch::naked_asm!(
         "mov [{user_rsp}], rsp",
         "mov rsp, [{stack_top}]",
+        "push qword ptr [{user_rsp}]", // RSP de usuario, a salvo en la pila de esta tarea
         "push rcx", // RIP de retorno a ring 3, puesto por `syscall`
         "push r11", // RFLAGS de usuario, puesto por `syscall`
         "push r9",
@@ -222,7 +237,7 @@ pub unsafe extern "C" fn syscall_entry() {
         "pop r9",
         "pop r11",
         "pop rcx",
-        "mov rsp, [{user_rsp}]",
+        "pop rsp", // RSP de usuario de ESTA tarea
         "sysretq",
         user_rsp = sym USER_RSP_SCRATCH,
         stack_top = sym SYSCALL_STACK_TOP,
@@ -287,6 +302,7 @@ extern "C" fn syscall_dispatch(frame: *mut SyscallFrame) -> u64 {
         SYS_WAIT => sys_wait(frame),
         SYS_KILL => sys_kill(frame),
         SYS_FSTAT => sys_fstat(frame),
+        SYS_LSEEK => sys_lseek(frame),
         SYS_RT_SIGPROCMASK => sys_rt_sigprocmask(frame),
         SYS_ARCH_PRCTL => sys_arch_prctl(frame),
         SYS_FUTEX => sys_futex(frame),
@@ -334,7 +350,7 @@ fn sys_fork(frame: &SyscallFrame) -> u64 {
     unsafe {
         FORK_CHILD_PID = child_pid;
         FORK_CHILD_RIP = frame.user_rip;
-        FORK_CHILD_RSP = USER_RSP_SCRATCH;
+        FORK_CHILD_RSP = frame.user_rsp;
     }
     scheduler::spawn_with_space(fork_child_trampoline, child_p4, child_pid);
 
@@ -372,7 +388,8 @@ fn fork_child_trampoline() -> ! {
 /// proceso de verdad y no vuelve a ejecutarse.
 fn sys_exit(frame: &SyscallFrame) -> ! {
     let pid = process::current_pid();
-    let code = frame.arg0 as i32;
+    // Solo los 8 bits bajos, como en POSIX: `exit(-1)` es el código 255.
+    let code = (frame.arg0 & 0xFF) as i32;
     process::mark_zombie(pid, code);
     serial_println!("[syscall] exit: PID {} terminó con código {}", pid, code);
     scheduler::mark_current_finished();
@@ -584,6 +601,54 @@ fn sys_write(frame: &SyscallFrame) -> u64 {
     result.unwrap_or(u64::MAX)
 }
 
+/// `lseek(fd, offset, whence)` — devuelve la posición nueva, o un errno
+/// negativo.
+///
+/// - fd 0/1/2 (el puerto serie) y los ficheros abiertos para escritura
+///   (un buffer que solo crece hasta `close()`, ver `FdEntry::WriteFile`)
+///   no tienen posición: `ESPIPE`. No es un detalle — es justo lo que
+///   pregunta la stdio de mlibc la primera vez que usa un `FILE` (un
+///   `lseek(fd, 0, SEEK_CUR)`) para decidir si es un fichero o un flujo.
+///   Con cualquier otro error da el `FILE` por roto y `printf` no llega a
+///   escribir nada.
+/// - Ficheros abiertos para lectura: mueve el cursor de verdad
+///   (`SEEK_SET`/`SEEK_CUR`/`SEEK_END`), sin dejarlo salir de [0, tamaño].
+fn sys_lseek(frame: &SyscallFrame) -> u64 {
+    const SEEK_SET: u64 = 0;
+    const SEEK_CUR: u64 = 1;
+    const SEEK_END: u64 = 2;
+
+    let fd = frame.arg0;
+    let offset = frame.arg1 as i64;
+    let whence = frame.arg2;
+
+    if fd <= 2 {
+        return ESPIPE;
+    }
+    let pid = process::current_pid();
+    let index = (fd as usize).wrapping_sub(3);
+    let result = process::with_pid_mut(pid, |pcb| match pcb.fds.get_mut(index) {
+        Some(Some(FdEntry::ReadFile { data, cursor })) => {
+            let base = match whence {
+                SEEK_SET => 0,
+                SEEK_CUR => *cursor as i64,
+                SEEK_END => data.len() as i64,
+                _ => return EINVAL,
+            };
+            match base.checked_add(offset) {
+                Some(pos) if pos >= 0 && pos <= data.len() as i64 => {
+                    *cursor = pos as usize;
+                    pos as u64
+                }
+                _ => EINVAL,
+            }
+        }
+        Some(Some(FdEntry::WriteFile { .. })) => ESPIPE,
+        _ => EBADF,
+    });
+    result.unwrap_or(EBADF)
+}
+
 /// `open(path, flags)` — solo mira el bit `O_WRONLY`, ver su
 /// definición más arriba. Sin él: lectura, el fichero debe existir ya
 /// en el VFS. Con él: escritura, siempre empieza en blanco (como si
@@ -619,7 +684,7 @@ fn sys_open(frame: &SyscallFrame) -> u64 {
             Some(data) => FdEntry::ReadFile { data, cursor: 0 },
             None => {
                 serial_println!("[syscall] open: '{}' no existe en el VFS", name);
-                return u64::MAX;
+                return ENOENT;
             }
         }
     };
@@ -708,6 +773,10 @@ fn sys_mmap(frame: &SyscallFrame) -> u64 {
             serial_println!("[syscall] mmap: sin memoria física");
             return u64::MAX;
         };
+        // Un mapeo anónimo se entrega a cero, siempre — es lo que promete
+        // `mmap()` (el allocator de mlibc cuenta con ello) y evita además
+        // filtrar a este proceso lo que otro dejó en el frame.
+        unsafe { core::ptr::write_bytes(phys as *mut u8, 0, 4096) };
         if let Err(e) = unsafe { mmu::map_page_in(pcb.page_table, page, phys, true, false) } {
             serial_println!("[syscall] mmap: fallo mapeando 0x{:x}: {}", page, e);
             return u64::MAX;
@@ -960,6 +1029,10 @@ fn sys_execve(frame: &SyscallFrame) -> u64 {
             return u64::MAX;
         }
     };
+    // Esta función no vuelve nunca si todo va bien (`enter_ring3` al
+    // final), así que nada de lo que siga vivo aquí llega a soltarse solo:
+    // la copia del fichero hay que devolverla a mano.
+    drop(bytes);
 
     // 768 GiB, índice P4 = 1 — genuinamente privado del nuevo espacio.
     // Antes vivía en 448 GiB (P4 = 0, POR DEBAJO del límite de 512 GiB
@@ -975,16 +1048,24 @@ fn sys_execve(frame: &SyscallFrame) -> u64 {
     // `auxv`, ver su comentario en `process.rs`) — antes esta función
     // mapeaba la página a mano y usaba `user_stack_virt + 4096` tal
     // cual como RSP; ahora comparte el mismo camino que `spawn_elf`.
-    let user_stack_top = match unsafe { process::map_fresh_user_stack(loaded.page_table, user_stack_virt, loaded.entry_point) } {
+    // `argv` del programa nuevo: de momento solo su propio nombre — el
+    // puntero `argv` que pasa el llamante (`arg1`) aún no se lee, falta
+    // un acceso validado a memoria de usuario (ver docs/TODO.md).
+    let user_stack_top = match unsafe {
+        process::map_fresh_user_stack(loaded.page_table, user_stack_virt, loaded.entry_point, &[name])
+    } {
         Ok(top) => top,
         Err(e) => {
             serial_println!("[syscall] execve: fallo mapeando la pila de usuario: {}", e);
+            unsafe { mmu::free_address_space(loaded.page_table) };
             return u64::MAX;
         }
     };
 
     let pid = process::current_pid();
+    let old_page_table = process::find(pid).map(|p| p.page_table);
     process::set_page_table(pid, loaded.page_table);
+    process::reset_for_exec(pid);
     // También en el scheduler, no solo en el PCB — ver el comentario
     // largo de `scheduler::set_task_page_table` sobre el bug real que
     // esto arregla (CR3 revertido al espacio VIEJO si el timer preempta
@@ -1000,6 +1081,15 @@ fn sys_execve(frame: &SyscallFrame) -> u64 {
 
     unsafe {
         mmu::switch_address_space(loaded.page_table);
+        tls::write_fs_base(0);
+        // El espacio anterior ya no lo usa nadie (CR3 acaba de cambiar):
+        // devolver su memoria. Antes se perdía entera en cada `execve()`.
+        // `name` vive en la pila de kernel, no en ese espacio.
+        if let Some(old) = old_page_table {
+            if old != loaded.page_table {
+                mmu::free_address_space(old);
+            }
+        }
         ring3::enter_ring3(loaded.entry_point, user_stack_top);
     }
 }

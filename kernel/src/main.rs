@@ -69,6 +69,7 @@ pub extern "C" fn kernel_main_upper(mb2_info_ptr: u64) -> ! {
     serial_println!("[pic] remapeado a vectores 32-47, todo enmascarado (sin drivers de IRQ aún)");
 
     keyboard::init(); // desenmascara IRQ1 — no llegará nada hasta el `sti` de más abajo
+    serial::enable_rx_interrupt(); // IRQ4: lo recibido por COM1 pasa a una cola, igual que el teclado
 
     // M2 — allocador físico + heap del kernel.
     unsafe { pmm::init(mb2_info_ptr) };
@@ -80,11 +81,24 @@ pub extern "C" fn kernel_main_upper(mb2_info_ptr: u64) -> ! {
     unsafe { mmu::init() };
     serial_println!("[mmu] EFER.NXE habilitado");
 
+    // SSE para ring 3 (CR0.EM/MP, CR4.OSFXSR/OSXMMEXCPT) — cualquier
+    // binario C lo necesita, ver `tls::enable_sse`.
+    tls::enable_sse();
+    serial_println!("[cpu] SSE habilitado para ring 3 (CR4.OSFXSR | OSXMMEXCPT)");
+
     // Prueba end-to-end del heap: un Box real. Si esto imprime el valor
     // correcto, `#[global_allocator]` funciona de extremo a extremo, no
     // solo que compila.
     let boxed = Box::new(0xC0FFEEu64);
     serial_println!("[heap] Box::new(0xC0FFEE) = 0x{:x} (dirección: {:p})", *boxed, boxed);
+    drop(boxed);
+
+    // M2b — el heap ya recicla memoria: reserva/libera en desorden y
+    // 64 MiB de reservas sucesivas sobre un heap de 8 MiB.
+    match heap::self_test() {
+        Ok(()) => serial_println!("[heap] free-list OK — la memoria liberada se fusiona y se reutiliza"),
+        Err(e) => serial_println!("[heap] ¡ERROR en la prueba del heap!: {}", e),
+    }
 
     // Prueba end-to-end: disparamos un breakpoint por software (#BP) y
     // comprobamos que el handler se ejecuta y la CPU sigue viva después.
@@ -303,7 +317,6 @@ pub extern "C" fn kernel_main_upper(mb2_info_ptr: u64) -> ! {
         }
     }
 
-    // TODO M2b: heap real con free-list (recuperar memoria de dealloc)
     // TODO M2c: syscalls reales — aquí `caps::enforce` pasa a llamarse
     //           por cada una
     // TODO M3c: ampliar el alfabeto de font.rs más allá de F/O/R/G/E/S/B/T/K
@@ -339,7 +352,7 @@ pub extern "C" fn kernel_main_upper(mb2_info_ptr: u64) -> ! {
         let _ = c.pledge(caps::CAP_STDIO | caps::CAP_EXEC);
         c
     });
-    match unsafe { process::spawn_elf(&elf::TEST_ELF_EMBER, 0) } {
+    match unsafe { process::spawn_elf(&elf::TEST_ELF_EMBER, 0, &["ember"]) } {
         Ok(pid) => {
             serial_println!("[ember] PID {} arrancado — preemption real activada de forma permanente", pid);
             preempt::set_enabled(true);
@@ -353,8 +366,6 @@ pub extern "C" fn kernel_main_upper(mb2_info_ptr: u64) -> ! {
 
     serial_println!("");
     serial_println!("Boot completo — entrando en la consola de depuración.");
-    // M9: verificación automática del hello-world en QEMU headless
-    console::autorun_hello_test();
     console::run()
 }
 

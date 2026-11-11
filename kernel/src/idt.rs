@@ -80,6 +80,8 @@ pub fn init() {
             .set_handler(crate::preempt::timer_entry as u64, 0);
         IDT[(crate::pic::PIC1_OFFSET + crate::keyboard::IRQ) as usize]
             .set_handler(crate::keyboard::keyboard_interrupt_handler as u64, 0);
+        IDT[(crate::pic::PIC1_OFFSET + crate::serial::IRQ) as usize]
+            .set_handler(crate::serial::serial_interrupt_handler as u64, 0);
 
         let ptr = IdtPointer {
             limit: (size_of::<[IdtEntry; 256]>() - 1) as u16,
@@ -90,8 +92,10 @@ pub fn init() {
     serial_println!("[idt] cargada: #DE #BP #UD #DF #GP #PF");
 }
 
-extern "x86-interrupt" fn divide_error(_frame: InterruptStackFrame) {
-    serial_println!("[EXCEPTION] Divide error (#DE)");
+extern "x86-interrupt" fn divide_error(frame: InterruptStackFrame) {
+    let rip = frame.instruction_pointer;
+    serial_println!("[EXCEPTION] Divide error (#DE) en rip=0x{:x}", rip);
+    kill_if_ring3(&frame, crate::signal::SIGFPE);
     halt();
 }
 
@@ -104,6 +108,7 @@ extern "x86-interrupt" fn breakpoint(frame: InterruptStackFrame) {
 extern "x86-interrupt" fn invalid_opcode(frame: InterruptStackFrame) {
     let rip = frame.instruction_pointer;
     serial_println!("[EXCEPTION] Invalid opcode (#UD) en rip=0x{:x}", rip);
+    kill_if_ring3(&frame, crate::signal::SIGILL);
     halt();
 }
 
@@ -115,6 +120,28 @@ extern "x86-interrupt" fn double_fault(_frame: InterruptStackFrame, error_code: 
 extern "x86-interrupt" fn general_protection_fault(frame: InterruptStackFrame, error_code: u64) {
     let rip = frame.instruction_pointer;
     serial_println!("[EXCEPTION] GPF (error_code={}) en rip=0x{:x}", error_code, rip);
+    kill_if_ring3(&frame, crate::signal::SIGSEGV);
+    halt();
+}
+
+/// Si la excepción vino de ring 3, es un fallo del PROCESO, no del
+/// kernel: se le mata con `sig` y se cede el turno — no vuelve. Si vino
+/// de ring 0 vuelve sin hacer nada y el llamante hace `halt()`: eso sí
+/// es un bug de kernel, no hay proceso al que culpar.
+///
+/// Mismo camino que ya seguía `page_fault` para SIGSEGV, ahora común a
+/// #DE/#UD/#GP: antes, una división por cero o una instrucción ilegal en
+/// CUALQUIER programa de usuario colgaba el sistema entero.
+fn kill_if_ring3(frame: &InterruptStackFrame, sig: u32) {
+    if frame.code_segment & 0x3 != 3 {
+        return;
+    }
+    crate::signal::kill_current(sig);
+    // Mismo `sti` que en `sys_exit()`: este gate enmascara IF al entrar y
+    // `yield_now()` puede saltar a una tarea que nunca pasó por aquí —
+    // ver la nota larga en `page_fault`.
+    unsafe { core::arch::asm!("sti") };
+    crate::scheduler::yield_now();
     halt();
 }
 
@@ -128,10 +155,7 @@ extern "x86-interrupt" fn general_protection_fault(frame: InterruptStackFrame, e
 /// un bug de kernel de verdad, no algo de lo que "recuperarse" matando
 /// un proceso (no hay proceso al que matar).
 ///
-/// Alcance de esta pasada: solo `#PF`. `#GP` (ring 3 ejecutando una
-/// instrucción privilegiada, por ejemplo) sigue colgando el kernel
-/// entero — mismo tratamiento pendiente, aparte, para no ampliar el
-/// riesgo de esta pasada más de lo que pide el TODO.
+/// `#DE`/`#UD`/`#GP` reciben el mismo tratamiento vía `kill_if_ring3`.
 extern "x86-interrupt" fn page_fault(frame: InterruptStackFrame, error_code: u64) {
     let fault_addr: u64;
     unsafe { core::arch::asm!("mov {}, cr2", out(reg) fault_addr) };

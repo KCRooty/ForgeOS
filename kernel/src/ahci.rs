@@ -93,14 +93,34 @@ pub struct AhciPort {
     cmd_table: u64,
 }
 
+/// Puertos ya montados. Sin esto, cada `first_disk()` (uno por comando
+/// `ext2ls`/`ext2cat`/`run`/`partinfo`/`disktest` de la consola) volvía a
+/// reservar tres frames nuevos para el mismo puerto y abandonaba los
+/// anteriores: 12 KiB de memoria física perdidos por comando.
+const MAX_CACHED_PORTS: usize = 8;
+static mut PORT_CACHE: [Option<AhciPort>; MAX_CACHED_PORTS] = [None; MAX_CACHED_PORTS];
+
 /// Monta Command List + área de recepción de FIS para un puerto y
-/// arranca su motor de comandos. Se hace una sola vez por puerto.
+/// arranca su motor de comandos. Se hace una sola vez por puerto —
+/// `init_port` es quien lo garantiza, recordando los ya montados.
 ///
 /// Simplificación deliberada de esta pasada: no esperamos activamente a
 /// que PxCMD.CR/FR reflejen el estado antes de continuar — la mayoría
 /// de implementaciones de referencia sí lo hacen; en QEMU funciona sin
 /// eso, en hardware real podría necesitar ese endurecimiento después.
 unsafe fn init_port(port_base: u64) -> Option<AhciPort> {
+    let cache = &mut *core::ptr::addr_of_mut!(PORT_CACHE);
+    if let Some(port) = cache.iter().flatten().find(|p| p.port_base == port_base) {
+        return Some(*port);
+    }
+    let port = setup_port(port_base)?;
+    if let Some(slot) = cache.iter_mut().find(|slot| slot.is_none()) {
+        *slot = Some(port);
+    }
+    Some(port)
+}
+
+unsafe fn setup_port(port_base: u64) -> Option<AhciPort> {
     // Parar el motor de comandos por si venía arrancado de antes.
     let mut cmd = reg_read(port_base, PORT_CMD_REG);
     cmd &= !CMD_ST;
