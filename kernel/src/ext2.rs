@@ -159,10 +159,13 @@ impl Ext2Fs {
         Ok(Inode { mode, size, block })
     }
 
-    /// Lista de bloques de datos lógicos del fichero, en orden —
-    /// directos (0-11) seguidos de los del indirecto simple (puntero
-    /// 12). Sin doble/triple indirecto: error explícito si el fichero
-    /// los necesita, en vez de devolver una lista truncada en silencio.
+    /// Lista de bloques de datos lógicos del fichero, en orden:
+    /// directos (punteros 0-11), indirecto simple (12) e indirecto doble
+    /// (13). Con bloque de 1 KiB eso cubre 12 + 256 + 256² bloques, unos
+    /// 64 MiB por fichero; con 4 KiB, unos 4 GiB (el tope de `i_size` de
+    /// 32 bits). Sin triple indirecto (puntero 14): error explícito si el
+    /// fichero lo necesita, en vez de devolver una lista truncada en
+    /// silencio.
     fn data_blocks(&self, inode: &Inode) -> Result<Vec<u32>, &'static str> {
         let needed = (inode.size as u64).div_ceil(self.block_size as u64) as usize;
         let mut blocks = Vec::with_capacity(needed);
@@ -173,34 +176,56 @@ impl Ext2Fs {
             }
             blocks.push(b);
         }
-
         if blocks.len() >= needed {
             return Ok(blocks);
         }
 
-        let indirect_ptr = inode.block[12];
-        if indirect_ptr == 0 {
-            return Err("faltan bloques de datos y el indirecto simple está vacío (inodo corrupto?)");
+        // Indirecto simple: un bloque lleno de punteros a bloques de datos.
+        self.push_indirect(inode.block[12], needed, &mut blocks)?;
+        if blocks.len() >= needed {
+            return Ok(blocks);
         }
-        let indirect = self.read_block(indirect_ptr)?;
-        let ptrs_per_block = (self.block_size / 4) as usize;
-        for i in 0..ptrs_per_block {
+
+        // Indirecto doble: un bloque lleno de punteros a bloques como el
+        // de arriba.
+        let double_ptr = inode.block[13];
+        if double_ptr == 0 {
+            return Err("faltan bloques de datos y el indirecto doble está vacío (inodo corrupto?)");
+        }
+        let double = self.read_block(double_ptr)?;
+        for i in 0..(self.block_size / 4) as usize {
             if blocks.len() >= needed {
                 return Ok(blocks);
             }
-            blocks.push(u32_at(&indirect, i * 4));
+            self.push_indirect(u32_at(&double, i * 4), needed, &mut blocks)?;
         }
 
         if blocks.len() < needed {
-            return Err("fichero necesita doble/triple indirecto — no soportado en esta versión");
+            return Err("fichero necesita triple indirecto — no soportado en esta versión");
         }
         Ok(blocks)
+    }
+
+    /// Añade a `blocks` los punteros del bloque indirecto `indirect_ptr`,
+    /// parando en cuanto haya `needed`.
+    fn push_indirect(&self, indirect_ptr: u32, needed: usize, blocks: &mut Vec<u32>) -> Result<(), &'static str> {
+        if indirect_ptr == 0 {
+            return Err("faltan bloques de datos y el bloque indirecto está vacío (inodo corrupto?)");
+        }
+        let indirect = self.read_block(indirect_ptr)?;
+        for i in 0..(self.block_size / 4) as usize {
+            if blocks.len() >= needed {
+                break;
+            }
+            blocks.push(u32_at(&indirect, i * 4));
+        }
+        Ok(())
     }
 
     /// Lee el contenido completo de un fichero regular ya resuelto.
     pub fn read_inode_data(&self, inode: &Inode) -> Result<Vec<u8>, &'static str> {
         let blocks = self.data_blocks(inode)?;
-        let mut data = Vec::with_capacity(inode.size as usize);
+        let mut data = Vec::with_capacity(blocks.len() * self.block_size as usize);
         for b in blocks {
             let block_data = self.read_block(b)?;
             data.extend_from_slice(&block_data);

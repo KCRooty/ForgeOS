@@ -2,4 +2,6 @@
 *.elf
 hello_elf_bytes.txt
 build/
-
+# mlibc: clonada y compilada por mlibc-sysdeps/build-mlibc.sh
+mlibc/
+sysroot/

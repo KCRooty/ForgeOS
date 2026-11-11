@@ -37,7 +37,7 @@ if [ "${1:-}" == "--headless" ]; then
         -nic user,model=rtl8139 \
         "${DISK_ARGS[@]}" \
         -serial file:"$ROOT/boot.log" \
-        -display none
+        -display none || true   # el timeout ES la salida normal aquí
     echo "--- boot.log ---"
     cat "$ROOT/boot.log"
 else

@@ -27,9 +27,45 @@ pub fn run() -> ! {
     let _ = write!(port, "escribe 'help' para ver los comandos\r\n\r\n");
 
     loop {
+        // Trabajos de `run ... &` que hayan terminado entretanto.
+        reap_background(&mut port, false);
         let _ = write!(port, "{}", PROMPT);
         let line = read_line(&mut port);
         dispatch(&mut port, line.trim());
+    }
+}
+
+/// PIDs lanzados con `run ... &` que nadie ha recogido todavía. Solo la
+/// consola (una única tarea) toca esta lista.
+static mut BACKGROUND: Vec<u64> = Vec::new();
+
+/// Recoge los trabajos en segundo plano ya terminados e informa de cada
+/// uno. Con `block`, espera además a que terminen TODOS (comando `wait`).
+fn reap_background(port: &mut SerialPort, block: bool) {
+    let jobs = unsafe { &mut *core::ptr::addr_of_mut!(BACKGROUND) };
+    loop {
+        jobs.retain(|&pid| match process::reap_pid(pid) {
+            Some(code) => {
+                report_exit(port, pid, code);
+                false
+            }
+            None => true,
+        });
+        if !block || jobs.is_empty() {
+            return;
+        }
+        scheduler::yield_now();
+        unsafe { core::arch::asm!("hlt") };
+    }
+}
+
+/// Mensaje de fin de un proceso lanzado con `run`. Un código 128+N con
+/// N una señal conocida es la convención de `signal::deliver_default`.
+fn report_exit(port: &mut SerialPort, pid: u64, code: i32) {
+    if (129..=128 + 31).contains(&code) {
+        let _ = write!(port, "[run] PID {} terminado por la señal {} (código {})\r\n", pid, code - 128, code);
+    } else {
+        let _ = write!(port, "[run] PID {} terminó con código {}\r\n", pid, code);
     }
 }
 
@@ -79,7 +115,7 @@ fn dispatch(port: &mut SerialPort, line: &str) {
         "help" => {
             let _ = write!(
                 port,
-                "comandos: help, meminfo, caps, bp, panic, fb, pci, ahci, net, ping, disktest, partinfo, ls, cat, write, ext2ls, ext2cat, ring3test, synccalltest, synccalldeny, forktest, waittest, exec, ember, preempttest, preempttest3, segvtest, killtest, posixtest, crt0test, hellotest, ps\r\n"
+                "comandos: help, meminfo, caps, bp, panic, fb, pci, ahci, net, ping, disktest, partinfo, ls, cat, write, ext2ls, ext2cat, ring3test, synccalltest, synccalldeny, forktest, waittest, exec, ember, preempttest, preempttest3, segvtest, killtest, posixtest, crt0test, hellotest, run, wait, ps\r\n"
             );
         }
         "synccalltest" => {
@@ -203,6 +239,21 @@ fn dispatch(port: &mut SerialPort, line: &str) {
         "posixtest" => run_posix_test(port),
         "crt0test" => run_crt0_test(port),
         "hellotest" => run_hello_test(port),
+        "run" => {
+            // `argv` del programa: la ruta y todo lo que venga detrás.
+            // Un `&` final lo lanza en segundo plano, como en un shell.
+            let mut argv: Vec<&str> = parts.collect();
+            let background = argv.last() == Some(&"&");
+            if background {
+                argv.pop();
+            }
+            if argv.is_empty() {
+                let _ = write!(port, "uso: run <ruta absoluta en el ext2> [argumentos...] [&]   (p.ej. run /bin/hello)\r\n");
+            } else {
+                run_program(port, &argv, background);
+            }
+        }
+        "wait" => reap_background(port, true),
         "ps" => {
             let _ = write!(port, "PID  PPID  ESTADO\r\n");
             for p in process::list() {
@@ -293,7 +344,16 @@ fn dispatch(port: &mut SerialPort, line: &str) {
         "meminfo" => {
             let free = pmm::free_frame_count();
             let _ = write!(port, "frames libres: {} (~{} KiB)\r\n", free, free * 4);
-            let _ = write!(port, "heap usado: {} bytes\r\n", crate::heap::used_bytes());
+            let h = crate::heap::stats();
+            let _ = write!(
+                port,
+                "heap: {} de {} KiB usados (pico {} KiB), {} hueco(s) libre(s), mayor {} KiB\r\n",
+                h.used / 1024,
+                h.total / 1024,
+                h.peak / 1024,
+                h.free_blocks,
+                h.largest_free / 1024
+            );
         }
         "caps" => run_caps_demo(port),
         "bp" => unsafe { core::arch::asm!("int3") },
@@ -342,7 +402,12 @@ fn run_synccall_elf(port: &mut SerialPort) {
 /// siempre. `parent_pid` = 0 para "sin padre" (lanzado directamente
 /// desde la consola, no por `fork()`).
 fn launch_elf(port: &mut SerialPort, bytes: &[u8], parent_pid: u64) -> Option<u64> {
-    match unsafe { process::spawn_elf(bytes, parent_pid) } {
+    launch_elf_with_args(port, bytes, parent_pid, &["forge"])
+}
+
+/// Como `launch_elf`, con los argumentos del programa (`argv[0]` incluido).
+fn launch_elf_with_args(port: &mut SerialPort, bytes: &[u8], parent_pid: u64, argv: &[&str]) -> Option<u64> {
+    match unsafe { process::spawn_elf(bytes, parent_pid, argv) } {
         Ok(pid) => Some(pid),
         Err(e) => {
             let _ = write!(port, "carga del ELF falló: {}\r\n", e);
@@ -616,6 +681,67 @@ fn run_ext2cat(port: &mut SerialPort, path: &str) {
     }
 }
 
+/// `run <ruta> [args...] [&]` — carga un ELF desde el disco ext2 y lo
+/// ejecuta. En primer plano la consola espera a que termine, informa de
+/// su código de salida y libera su memoria; con `&` vuelve al prompt
+/// enseguida y el proceso se recoge más tarde (antes del siguiente
+/// prompt, o con `wait`). Es el primer camino por el que Forge
+/// OS ejecuta un programa que NO va incrustado en el propio kernel
+/// (todos los `TEST_ELF_*` de `elf.rs` lo están).
+///
+/// El proceso nace con todas las capabilities (igual que `hellotest`):
+/// todavía no hay usuarios ni política que decida un conjunto menor, y
+/// un binario de libc necesita como mínimo STDIO + MEM_MAP + FS.
+fn run_program(port: &mut SerialPort, argv: &[&str], background: bool) {
+    let path = argv[0];
+    let Some(fs) = mount_ext2(port) else { return };
+    let inode = match fs.resolve(path) {
+        Ok(i) => i,
+        Err(e) => {
+            let _ = write!(port, "{}: {}\r\n", path, e);
+            return;
+        }
+    };
+    if inode.is_dir() {
+        let _ = write!(port, "{}: es un directorio\r\n", path);
+        return;
+    }
+    let bytes = match fs.read_inode_data(&inode) {
+        Ok(b) => b,
+        Err(e) => {
+            let _ = write!(port, "{}: fallo al leer: {}\r\n", path, e);
+            return;
+        }
+    };
+
+    // Antes de lanzar, no después: en cuanto el proceso existe, el timer
+    // puede darle turno a mitad de esta línea y mezclar su salida con ella.
+    let _ = write!(port, "[run] {} ({} bytes)\r\n", path, bytes.len());
+    caps::set_current(caps::Capabilities::unrestricted());
+    let Some(pid) = launch_elf_with_args(port, &bytes, 0, argv) else { return };
+    // El ELF ya está copiado a los frames del proceso: el buffer del
+    // fichero no hace falta mientras corre.
+    drop(bytes);
+
+    if background {
+        let _ = write!(port, "[run] PID {} en segundo plano — 'wait' espera a que termine\r\n", pid);
+        unsafe { (*core::ptr::addr_of_mut!(BACKGROUND)).push(pid) };
+        return;
+    }
+
+    // Primer plano: ceder el turno hasta que el proceso sea zombie
+    // (`exit()` o una señal). `hlt` entre vueltas para no quemar CPU
+    // si no hay nadie más a quien ceder — el timer nos despierta.
+    let code = loop {
+        if let Some(code) = process::reap_pid(pid) {
+            break code;
+        }
+        scheduler::yield_now();
+        unsafe { core::arch::asm!("hlt") };
+    };
+    report_exit(port, pid, code);
+}
+
 /// Prueba real de preemption: dos tareas de kernel (`preempt::spin_a`/
 /// `spin_b`) que jamás llaman a `yield_now()` por su cuenta — si
 /// avanzan de todos modos mientras el timer las interrumpe, es la
@@ -782,7 +908,7 @@ fn run_posix_test(port: &mut SerialPort) {
 fn run_crt0_test(port: &mut SerialPort) {
     let _ = write!(port, "arrancando el binario de prueba crt0/mmap...\r\n");
     caps::set_current(caps::Capabilities::unrestricted());
-    if let Some(pid) = launch_elf(port, &elf::TEST_ELF_CRT0, 0) {
+    if let Some(pid) = launch_elf_with_args(port, &elf::TEST_ELF_CRT0, 0, &["crt0test"]) {
         let _ = write!(port, "PID {} arrancado — cediendo turno...\r\n", pid);
         for _ in 0..3 {
             scheduler::yield_now();
@@ -823,23 +949,5 @@ fn run_hello_test(port: &mut SerialPort) {
             scheduler::yield_now();
         }
         let _ = write!(port, "de vuelta en la consola.\r\n");
-    }
-}
-
-/// Auto-ejecuta el hello-world M9 una vez al arrancar el kernel — para
-/// verificación headless en QEMU sin necesitar input interactivo.
-/// Llamar desde main.rs justo antes de `console::run()`.
-pub fn autorun_hello_test() {
-    let mut port = SerialPort::init();
-    let _ = write!(port, "[autorun] lanzando hellotest M9...\r\n");
-    caps::set_current(caps::Capabilities::unrestricted());
-    if let Some(pid) = launch_elf(&mut port, &elf::TEST_ELF_HELLO, 0) {
-        let _ = write!(port, "[autorun] PID {} arrancado\r\n", pid);
-        for _ in 0..10 {
-            scheduler::yield_now();
-        }
-        let _ = write!(port, "[autorun] hellotest terminado\r\n");
-    } else {
-        let _ = write!(port, "[autorun] fallo al lanzar hello.elf\r\n");
     }
 }

@@ -1,0 +1,42 @@
+# Plantilla del cross-file de meson para ForgeOS (x86_64, ELF estático).
+# build-mlibc.sh sustituye @LLVM_SUFFIX@ por el sufijo de versión del
+# toolchain elegido ("" o "-20", ver userland/toolchain.sh) y
+# @CLANG_RESOURCE_INCLUDE@ por su directorio de cabeceras intrínsecas
+# (`clang -print-resource-dir`), y escribe el resultado en <mlibc>/x86_64-forgeos.cross.txt — así no hay
+# ninguna versión de LLVM fijada a mano aquí.
+
+[binaries]
+c       = 'clang@LLVM_SUFFIX@'
+cpp     = 'clang++@LLVM_SUFFIX@'
+ar      = 'llvm-ar@LLVM_SUFFIX@'
+nm      = 'llvm-nm@LLVM_SUFFIX@'
+strip   = 'llvm-strip@LLVM_SUFFIX@'
+objcopy = 'llvm-objcopy@LLVM_SUFFIX@'
+ld      = 'ld.lld@LLVM_SUFFIX@'
+
+# Sin -fno-pic a propósito: los binarios de ForgeOS se enlazan en 640 GiB
+# (0xA0_0000_0000, ver kernel/src/elf.rs), fuera del alcance de las
+# reubicaciones absolutas de 32 bits del modelo de código "small" no-PIC.
+# Con código PIC (lo que meson pide por defecto para una biblioteca
+# estática) todo el direccionamiento es RIP-relativo y la dirección de
+# enlace da igual.
+[built-in options]
+c_args   = ['-target', 'x86_64-elf',
+            '-ffreestanding', '-fno-stack-protector',
+            '-nostdinc',
+            '-D_GNU_SOURCE',
+            '-I@CLANG_RESOURCE_INCLUDE@']
+cpp_args = ['-target', 'x86_64-elf',
+            '-ffreestanding', '-fno-stack-protector',
+            '-nostdinc',
+            '-fno-rtti', '-fno-exceptions',
+            '-D_GNU_SOURCE',
+            '-I@CLANG_RESOURCE_INCLUDE@']
+c_link_args   = ['-target', 'x86_64-elf', '-nostdlib', '-fuse-ld=lld']
+cpp_link_args = ['-target', 'x86_64-elf', '-nostdlib', '-fuse-ld=lld']
+
+[host_machine]
+system     = 'forgeos'
+cpu_family = 'x86_64'
+cpu        = 'x86_64'
+endian     = 'little'

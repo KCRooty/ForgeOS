@@ -26,6 +26,14 @@ pub unsafe fn enter_ring3(entry: u64, user_stack_top: u64) -> ! {
         "push {flags}",    // RFLAGS — bit 9 (IF) puesto: interrupciones activas en ring 3
         "push {cs}",       // CS de usuario (con RPL=3 ya incluido en el selector)
         "push {entry}",    // RIP de usuario
+        // Ningún registro del kernel cruza a ring 3: lo que hubiera en
+        // ellos (punteros de kernel, restos de otra tarea) sería una fuga
+        // de información hacia el proceso. Los operandos de arriba ya
+        // están en la pila, así que se pueden pisar todos.
+        "xor eax, eax", "xor ebx, ebx", "xor ecx, ecx", "xor edx, edx",
+        "xor esi, esi", "xor edi, edi", "xor ebp, ebp",
+        "xor r8d, r8d", "xor r9d, r9d", "xor r10d, r10d", "xor r11d, r11d",
+        "xor r12d, r12d", "xor r13d, r13d", "xor r14d, r14d", "xor r15d, r15d",
         "iretq",
         ss = in(reg) gdt::USER_DATA_SELECTOR as u64,
         stack = in(reg) user_stack_top,
@@ -65,6 +73,14 @@ pub unsafe fn enter_ring3_with_rax(entry: u64, user_stack_top: u64, rax_value: u
         "push {cs}",
         "push {entry}",
         "mov rax, {rax_value}",
+        // Igual que en `enter_ring3`: todo a cero menos RAX. (El hijo de
+        // `fork()` debería heredar los registros del padre — limitación
+        // ya documentada arriba; mientras tanto, mejor ceros que restos
+        // del kernel.)
+        "xor ebx, ebx", "xor ecx, ecx", "xor edx, edx",
+        "xor esi, esi", "xor edi, edi", "xor ebp, ebp",
+        "xor r8d, r8d", "xor r9d, r9d", "xor r10d, r10d", "xor r11d, r11d",
+        "xor r12d, r12d", "xor r13d, r13d", "xor r14d, r14d", "xor r15d, r15d",
         "iretq",
         ss = in(reg) gdt::USER_DATA_SELECTOR as u64,
         stack = in(reg) user_stack_top,

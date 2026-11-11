@@ -52,7 +52,14 @@ unsafe fn write_msr(msr: u32, value: u64) {
 pub unsafe fn init() {
     let efer = read_msr(IA32_EFER);
     write_msr(IA32_EFER, efer | EFER_NXE);
+    KERNEL_P4 = read_cr3();
 }
+
+/// PML4 con el que arrancó el kernel (el de `boot.asm`): solo tiene el
+/// identity-map compartido de `P4[0]`, ningún mapeo de proceso. Nunca se
+/// libera — es el espacio "neutral" al que `free_address_space` cambia
+/// cuando le piden liberar el que está activo.
+static mut KERNEL_P4: u64 = 0;
 
 unsafe fn read_cr3() -> u64 {
     let val: u64;
@@ -292,13 +299,24 @@ unsafe fn free_subtree(table: u64, level: u8) {
 /// memoria — fuga de facto en sesiones largas (`process::reap_zombie`
 /// es el único llamante).
 ///
+/// Si `p4` es el espacio ACTIVO (CR3), antes de liberarlo se cambia al
+/// PML4 del kernel (`KERNEL_P4`) — liberar las tablas bajo tus propios
+/// pies sería fatal en cuanto alguien reciclara esos frames. Pasa de
+/// verdad: las tareas de kernel no tienen espacio propio y corren sobre
+/// el CR3 de quien tuvo el turno antes, así que la consola, al recoger
+/// el proceso que acaba de lanzar con `run`, suele estar todavía sobre
+/// el PML4 de ese mismo proceso recién muerto.
+///
 /// # Safety
-/// `p4` no debe ser el espacio de direcciones ACTIVO (CR3) en este
-/// momento — liberar las tablas bajo tus propios pies sería fatal. El
-/// llamante (`process::reap_zombie`, invocado por el padre sobre el
-/// PML4 de un hijo ya zombie) cumple esto por construcción: un proceso
-/// nunca libera su propio espacio.
+/// El llamante no puede depender de ningún mapeo privado de `p4`
+/// (`P4[1..]`): tras la llamada ya no existen. Código de kernel
+/// corriente lo cumple (solo usa el identity-map de `P4[0]`); un proceso
+/// NO puede liberar así su propio espacio desde una syscall y luego
+/// volver a ring 3 — ver `signal::deliver_default`.
 pub unsafe fn free_address_space(p4: u64) {
+    if read_cr3() == p4 {
+        switch_address_space(KERNEL_P4);
+    }
     for i in 1..512usize {
         let entry = *((p4 + (i as u64) * 8) as *const u64);
         if entry & PAGE_PRESENT == 0 {
@@ -365,11 +383,17 @@ pub unsafe fn translate(p4: u64, virt: u64) -> Option<u64> {
     Some((leaf_entry & ADDR_MASK) + (virt & 0xFFF))
 }
 
-/// Añade el bit PAGE_WRITABLE a la PTE leaf de `virt` en `p4`.
-/// No hace nada si la página no está mapeada. Necesario cuando dos
-/// segmentos PT_LOAD de un ELF comparten una página y el segundo tiene
-/// PF_W mientras el primero fue mapeado sin escritura.
-pub unsafe fn mark_writable_in(p4: u64, virt: u64) {
+/// Amplía los permisos de una página YA mapeada en `p4`: añade escritura
+/// si `writable`, y quita NO_EXECUTE si `executable`. Nunca retira un
+/// permiso que la página ya tuviera. No hace nada si no está mapeada.
+///
+/// Hace falta cuando dos segmentos PT_LOAD de un mismo ELF comparten una
+/// página de 4 KiB con permisos distintos — lo normal en la salida de un
+/// enlazador real: lld deja el final de `.rodata` (R) y el principio de
+/// `.text` (R+X) en la misma página. La página compartida necesita la
+/// UNIÓN de los permisos de ambos; antes solo se propagaba la escritura,
+/// y un `.text` que empezara a mitad de página quedaba no ejecutable.
+pub unsafe fn add_permissions_in(p4: u64, virt: u64, writable: bool, executable: bool) {
     let p3_entry = *((p4 + (table_index(virt, 3) as u64) * 8) as *const u64);
     if p3_entry & PAGE_PRESENT == 0 { return; }
     let p3 = p3_entry & ADDR_MASK;
@@ -380,7 +404,13 @@ pub unsafe fn mark_writable_in(p4: u64, virt: u64) {
     if p1_entry & PAGE_PRESENT == 0 { return; }
     let p1 = p1_entry & ADDR_MASK;
     let leaf_ptr = (p1 + (table_index(virt, 0) as u64) * 8) as *mut u64;
-    *leaf_ptr |= PAGE_WRITABLE;
+    if *leaf_ptr & PAGE_PRESENT == 0 { return; }
+    if writable {
+        *leaf_ptr |= PAGE_WRITABLE;
+    }
+    if executable {
+        *leaf_ptr &= !PAGE_NO_EXECUTE;
+    }
     flush_tlb_entry(virt);
 }
 

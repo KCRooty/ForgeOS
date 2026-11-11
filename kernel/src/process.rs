@@ -215,6 +215,25 @@ pub fn reap_zombie(parent_pid: u64) -> Option<(u64, i32)> {
     }
 }
 
+/// Recoge un proceso zombie CONCRETO por PID: lo saca de la tabla,
+/// libera su espacio de direcciones y devuelve su código de salida.
+/// `None` si el PID no existe o sigue vivo. Es el `waitpid(pid)` de
+/// quien no es un proceso — la consola de depuración (PID 0), que lanza
+/// programas en primer plano con `run` y no puede usar `reap_zombie`
+/// (recogería el primer zombie huérfano que hubiera, no el suyo).
+pub fn reap_pid(pid: u64) -> Option<i32> {
+    unsafe {
+        let table = &mut *TABLE.0.get();
+        let idx = table.iter().position(|p| p.pid == pid)?;
+        let ProcessState::Zombie(code) = table[idx].state else {
+            return None;
+        };
+        let pcb = table.remove(idx);
+        crate::mmu::free_address_space(pcb.page_table);
+        Some(code)
+    }
+}
+
 // --- lanzamiento del primer proceso de una demo (no un fork) ---
 //
 // Mismo patrón de "slot de handoff único" que `syscall::sys_fork` usa
@@ -251,68 +270,128 @@ pub unsafe fn spawn_process(entry_point: u64, user_stack_top: u64, page_table: u
     pid
 }
 
-// Tamaño total reservado al final de la página para el frame inicial más
-// el string del nombre del proceso: 10 qwords (80 bytes) + 8 bytes de
-// padding para alineación 16 + 8 bytes para el string "forge\0" = 96 bytes.
-// Con `stack_virt_top` page-aligned (múltiplo de 4096), `stack_virt_top - 96`
-// es también múltiplo de 16 — alineación correcta para SysV ABI x86_64.
-const INITIAL_STACK_FRAME_SIZE: u64 = 96;
+/// Límite de argumentos de un proceso nuevo. El frame inicial entero
+/// (cadenas + tabla de punteros) tiene que caber en la página más alta
+/// de la pila, y `write_initial_stack_frame` lo comprueba byte a byte —
+/// esto solo acota la tabla para que el cálculo no pueda desbordar.
+pub const MAX_ARGS: usize = 32;
 
-/// Escribe el frame inicial completo SysV x86_64 (M8f) en la cima de la
-/// pila de usuario. Layout desde el RSP inicial (stack_virt_top - 96):
+/// Escribe el frame inicial SysV x86_64 en la cima de la pila de usuario
+/// y devuelve el RSP con el que debe arrancar el proceso. Es lo que lee
+/// `_start` (`crt1.S` de mlibc, o `hello.asm` a mano):
 ///
-///   [rsp+  0]  argc          = 1
-///   [rsp+  8]  argv[0]       = ptr a "forge\0" (stack_virt_top - 8)
-///   [rsp+ 16]  argv[1]       = NULL
-///   [rsp+ 24]  envp[0]       = NULL
-///   [rsp+ 32]  AT_PAGESZ (6) / 4096
-///   [rsp+ 48]  AT_ENTRY  (9) / entry_point
-///   [rsp+ 64]  AT_NULL   (0) / 0
-///   [rsp+ 80]  padding (8 bytes)
-///   [rsp+ 88]  "forge\0\0" (string del nombre, 8 bytes)
+/// ```text
+///   [rsp]                 argc
+///   [rsp+8 ...]           argv[0] .. argv[argc-1]   (punteros)
+///                         NULL
+///                         NULL                      (envp vacío)
+///                         AT_PAGESZ (6), 4096
+///                         AT_ENTRY  (9), entry
+///                         AT_NULL   (0), 0
+///                         (8 bytes de relleno si hace falta para que
+///                          RSP quede alineado a 16)
+///   ...                   las cadenas de argv, terminadas en NUL
+///   stack_virt_top  ->    cima de la pila
+/// ```
 ///
-/// mlibc necesita AT_PAGESZ para su allocator y AT_ENTRY para dlinfo.
-/// `entry` es el punto de entrada del ELF cargado (rellenado por `load()`).
-unsafe fn write_initial_stack_frame(stack_phys: u64, stack_virt_top: u64, entry: u64) -> u64 {
-    // String "forge\0" en los últimos 8 bytes de la zona reservada
-    let str_phys = stack_phys + 4096 - 8;
-    unsafe {
-        let s = str_phys as *mut u8;
-        s.write(b'f'); s.add(1).write(b'o'); s.add(2).write(b'r');
-        s.add(3).write(b'g'); s.add(4).write(b'e'); s.add(5).write(0);
-        s.add(6).write(0); s.add(7).write(0);
+/// mlibc usa AT_PAGESZ en su allocator; AT_ENTRY lo consulta el enlazador
+/// dinámico. Sin variables de entorno todavía (`envp` siempre vacío).
+///
+/// `stack_phys` es el frame físico de la página MÁS ALTA de la pila;
+/// todo el frame tiene que caber en ella.
+unsafe fn write_initial_stack_frame(
+    stack_phys: u64,
+    stack_virt_top: u64,
+    entry: u64,
+    argv: &[&str],
+) -> Result<u64, &'static str> {
+    if argv.len() > MAX_ARGS {
+        return Err("demasiados argumentos para el proceso");
     }
-    let argv0_virt = stack_virt_top - 8;
+    // argc + punteros de argv + NULL + NULL de envp + 3 pares de auxv.
+    let table_qwords = 1 + argv.len() + 1 + 1 + 6;
+    let strings_len: usize = argv.iter().map(|a| a.len() + 1).sum();
+    // Las cadenas van arriba del todo; la tabla, debajo, alineada a 16.
+    let frame_len = (strings_len + 15) / 16 * 16 + (table_qwords * 8 + 15) / 16 * 16;
+    if frame_len > 4096 {
+        return Err("los argumentos no caben en la página inicial de la pila");
+    }
 
-    // 10 qwords del frame empezando en stack_phys + 4096 - 96
-    let frame_phys = stack_phys + 4096 - INITIAL_STACK_FRAME_SIZE;
-    let w = frame_phys as *mut u64;
-    unsafe {
-        w.add(0).write(1);          // argc
-        w.add(1).write(argv0_virt); // argv[0]
-        w.add(2).write(0);          // argv NULL term
-        w.add(3).write(0);          // envp NULL term
-        w.add(4).write(6);          // AT_PAGESZ
-        w.add(5).write(4096);
-        w.add(6).write(9);          // AT_ENTRY
-        w.add(7).write(entry);
-        w.add(8).write(0);          // AT_NULL
-        w.add(9).write(0);
-        // w.add(10): padding = 0 (ya cero de alloc_frame)
+    // Dentro de la página: desplazamiento 4096 = `stack_virt_top`.
+    let page = stack_phys as *mut u8;
+    let virt_of = |offset: usize| stack_virt_top - 4096 + offset as u64;
+
+    let mut arg_ptrs = [0u64; MAX_ARGS];
+    let mut cursor = 4096;
+    for (i, arg) in argv.iter().enumerate() {
+        cursor -= arg.len() + 1;
+        unsafe {
+            core::ptr::copy_nonoverlapping(arg.as_ptr(), page.add(cursor), arg.len());
+            page.add(cursor + arg.len()).write(0);
+        }
+        arg_ptrs[i] = virt_of(cursor);
     }
-    stack_virt_top - INITIAL_STACK_FRAME_SIZE
+
+    let table_offset = 4096 - frame_len;
+    let table = unsafe { page.add(table_offset) } as *mut u64;
+    let mut slot = 0;
+    let mut push = |value: u64| {
+        unsafe { table.add(slot).write(value) };
+        slot += 1;
+    };
+    push(argv.len() as u64); // argc
+    for &ptr in &arg_ptrs[..argv.len()] {
+        push(ptr);
+    }
+    push(0); // fin de argv
+    push(0); // fin de envp (vacío)
+    push(6); // AT_PAGESZ
+    push(4096);
+    push(9); // AT_ENTRY
+    push(entry);
+    push(0); // AT_NULL
+    push(0);
+
+    Ok(virt_of(table_offset))
 }
 
-/// Mapea una pila de usuario nueva de una página, con el frame inicial
-/// de `write_initial_stack_frame` ya escrito — núcleo compartido entre
-/// `spawn_elf` y `syscall::sys_execve` (los dos únicos sitios donde un
-/// proceso "arranca de cero" de verdad, a diferencia de `fork()`, que
-/// reanuda la pila YA EXISTENTE del padre). `entry` es el punto de
-/// entrada del ELF (necesario para AT_ENTRY en el auxv).
-pub unsafe fn map_fresh_user_stack(page_table: u64, stack_virt: u64, entry: u64) -> Result<u64, &'static str> {
-    let stack_phys = crate::pmm::alloc_frame().ok_or("sin memoria para la pila de usuario")?;
-    crate::mmu::map_page_in(page_table, stack_virt, stack_phys, true, false)?;
-    Ok(unsafe { write_initial_stack_frame(stack_phys, stack_virt + 4096, entry) })
+/// Páginas de pila de usuario de un proceso recién arrancado: 256 KiB.
+/// Una sola página (lo que había hasta M10) bastaba para los binarios de
+/// prueba en ensamblador, pero no para C real: solo el `printf` de mlibc
+/// ya gasta varios KiB de pila en buffers de formateo. Se mapea entera
+/// al arrancar — sin paginación bajo demanda todavía, así que este es
+/// también el límite duro: pasarse por debajo es un SIGSEGV.
+pub const USER_STACK_PAGES: u64 = 64;
+
+/// Mapea una pila de usuario nueva, con el frame inicial de
+/// `write_initial_stack_frame` ya escrito en su página más alta — núcleo
+/// compartido entre `spawn_elf` y `syscall::sys_execve` (los dos únicos
+/// sitios donde un proceso "arranca de cero" de verdad, a diferencia de
+/// `fork()`, que reanuda la pila YA EXISTENTE del padre). `entry` es el
+/// punto de entrada del ELF (necesario para AT_ENTRY en el auxv).
+///
+/// `stack_virt` es la dirección de la página MÁS ALTA de la pila (la
+/// cima queda en `stack_virt + 4096`, igual que cuando la pila era de
+/// una sola página); el resto de `USER_STACK_PAGES` se mapean por debajo.
+/// `argv` son los argumentos del programa, `argv[0]` incluido.
+pub unsafe fn map_fresh_user_stack(
+    page_table: u64,
+    stack_virt: u64,
+    entry: u64,
+    argv: &[&str],
+) -> Result<u64, &'static str> {
+    let mut top_page_phys = 0;
+    for i in 0..USER_STACK_PAGES {
+        let phys = crate::pmm::alloc_frame().ok_or("sin memoria para la pila de usuario")?;
+        // `alloc_frame` no limpia: un frame reciclado trae lo que dejó su
+        // dueño anterior (posiblemente otro proceso).
+        unsafe { core::ptr::write_bytes(phys as *mut u8, 0, 4096) };
+        crate::mmu::map_page_in(page_table, stack_virt - i * 4096, phys, true, false)?;
+        if i == 0 {
+            top_page_phys = phys;
+        }
+    }
+    unsafe { write_initial_stack_frame(top_page_phys, stack_virt + 4096, entry, argv) }
 }
 
 /// Carga un ELF64 desde `bytes`, le monta una pila de usuario, y lo
@@ -322,12 +401,36 @@ pub unsafe fn map_fresh_user_stack(page_table: u64, stack_virt: u64, entry: u64)
 /// `main.rs` (sin puerto al que escribir, solo `serial_println!`) —
 /// antes duplicado en `console.rs`, movido aquí para que ambos usen
 /// exactamente el mismo camino en vez de dos copias que podrían
-/// divergir con el tiempo.
-pub unsafe fn spawn_elf(bytes: &[u8], parent_pid: u64) -> Result<u64, &'static str> {
+/// divergir con el tiempo. `argv` incluye `argv[0]` (el nombre del
+/// programa).
+pub unsafe fn spawn_elf(bytes: &[u8], parent_pid: u64, argv: &[&str]) -> Result<u64, &'static str> {
     let loaded = crate::elf::load(bytes)?;
 
     let user_stack_virt: u64 = 0x0000_0090_0000_0000; // 576 GiB, privado del proceso
-    let user_stack_top = unsafe { map_fresh_user_stack(loaded.page_table, user_stack_virt, loaded.entry_point) }?;
+    let user_stack_top = match unsafe { map_fresh_user_stack(loaded.page_table, user_stack_virt, loaded.entry_point, argv) } {
+        Ok(top) => top,
+        Err(e) => {
+            // El proceso no llega a existir: devolver lo ya cargado.
+            unsafe { crate::mmu::free_address_space(loaded.page_table) };
+            return Err(e);
+        }
+    };
 
     Ok(spawn_process(loaded.entry_point, user_stack_top, loaded.page_table, parent_pid))
+}
+
+/// Deja el PCB de `pid` como recién creado en todo lo que depende del
+/// espacio de direcciones: heap, arena de `mmap()` y TLS. Para
+/// `execve()`, que sustituye el espacio entero — sin esto el programa
+/// nuevo heredaba `heap_mapped_end` del anterior y su primer `brk()` daba
+/// por mapeadas páginas que en el espacio nuevo no existen.
+/// Los descriptores de fichero se conservan, como manda POSIX.
+pub fn reset_for_exec(pid: u64) {
+    with_pid_mut(pid, |pcb| {
+        pcb.heap_top = HEAP_BASE;
+        pcb.heap_mapped_end = HEAP_BASE;
+        pcb.mmap_next = MMAP_BASE;
+        pcb.fs_base = 0;
+        pcb.tid_ptr = 0;
+    });
 }

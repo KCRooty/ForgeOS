@@ -16,7 +16,34 @@ Ver [docs/PHILOSOPHY.md](docs/PHILOSOPHY.md) (diseño técnico) y
 [docs/PRODUCT.md](docs/PRODUCT.md) (a quién sirve y por qué) para el
 razonamiento completo detrás de cada decisión.
 
-## Estado: red (`ping`), Ember (PID 1 real, arranca solo en el boot y no termina nunca), ext2 de solo lectura, escáner GPT/MBR (`partinfo`), preemption real en kernel y en ring 3 (`preempttest`/`preempttest3`), señales SIGKILL/SIGTERM/SIGSEGV (`segvtest`, `killtest`) y `read`/`write`/`open`/`close`/`brk`/`mmap`/`munmap` reales + pila inicial compatible con `crt0` — primer paso POSIX completo hacia mlibc (`posixtest`, `crt0test`) — todo verificado en QEMU con más de 35 arranques repetidos desde cero, tras arreglar DOS bugs reales de concurrencia que solo salían a la luz repitiendo el arranque: `execve()` no sincronizaba la tabla de páginas nueva con la copia que usa el scheduler (corrupción intermitente), y un `sti` que faltaba en el cambio de contexto dejaba el sistema entero bloqueado para siempre en cuanto un hilo de kernel que nunca cede el turno recibía su primer turno (ver `docs/TODO.md`). Con esto, el TODO original de la reconstrucción está completo; el trabajo actual apunta a escribir el sysdeps de mlibc contra esta ABI + Bellows (shell real).
+## Estado
+
+Forge OS arranca, monta un ext2 real y ejecuta programas en C:
+
+```
+forge> run /bin/hello
+hello, forge! (C + mlibc)
+argc=1 argv[0]=/bin/hello
+malloc(65536) OK, checksum=8355840 (esperado 8355840)
+H(100)=5.187378 (esperado 5.187378)
+[run] PID 4 terminó con código 42
+```
+
+- **Procesos:** espacios de direcciones propios, `fork`/`execve`/`wait`/
+  `exit`, preemption real por timer en kernel y en ring 3, señales con
+  su acción por defecto (un fallo en un programa mata al programa, no
+  al sistema), Ember como PID 1.
+- **Userland:** [mlibc](https://github.com/managarm/mlibc) portada
+  (parte ANSI C), binarios ELF estáticos cargados desde disco, FPU/SSE
+  por proceso.
+- **Almacenamiento y red:** AHCI, ext2 de solo lectura, escáner GPT/MBR,
+  RTL8139 con ARP + ICMP (`ping`).
+- **Pruebas:** `tools/smoke-test.sh` pasa toda la batería en QEMU y
+  comprueba la salida.
+
+Lo siguiente: la parte POSIX de mlibc (`fork`/`exec` desde C) y Bellows,
+el shell real. El inventario completo — lo hecho, lo que falta y cada
+bug encontrado por el camino — está en [docs/TODO.md](docs/TODO.md).
 
 ## Referencias de arquitectura estudiadas
 - Asmodeus14/Nyx (Rust, QCLang, motor 3D Gen9.5 hand-rolled)
@@ -28,8 +55,8 @@ razonamiento completo detrás de cada decisión.
 ## Build (CachyOS / Arch)
 ```bash
 yay -S rustup nasm qemu-full grub xorriso lld
-rustup toolchain install nightly-2026-07-01
-rustup component add rust-src --toolchain nightly-2026-07-01
+rustup toolchain install nightly-2026-10-10
+rustup component add rust-src --toolchain nightly-2026-10-10
 ./tools/build.sh
 ```
 
@@ -59,6 +86,27 @@ MBR válida) — genéralo con:
 ```
 Crea un ext2 real de 16 MiB con un par de ficheros de prueba. Desde la
 consola: `ext2ls /`, `ext2cat /hello.txt`.
+
+## Programas de usuario (C + mlibc)
+
+```bash
+yay -S clang lld llvm meson ninja       # clang >= 19
+./userland/mlibc-sysdeps/build-mlibc.sh # una vez: clona y compila mlibc
+make -C userland                        # compila userland/c/*.c
+./tools/make-test-disk.sh               # los copia a /bin de disk.img
+```
+
+Desde la consola: `run /bin/hello`, `run /bin/libctest` (autoprueba de
+la libc, código de salida = pruebas fallidas), `run /bin/crash div0`.
+Un `&` final lanza en segundo plano; `wait` espera a que terminen.
+
+## Pruebas de regresión
+
+```bash
+./tools/smoke-test.sh       # una pasada de toda la batería en QEMU
+./tools/smoke-test.sh 15    # 15 arranques en frío seguidos
+./tools/qemu-console.py "run /bin/hello" ps meminfo   # comandos sueltos
+```
 
 Para probar el escáner de particiones (`partinfo.rs`), genera y copia
 como `disk.img` cualquiera de los dos discos de:

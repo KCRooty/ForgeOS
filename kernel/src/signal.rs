@@ -26,12 +26,16 @@
 
 use crate::{mmu, process, scheduler, serial_println};
 
+pub const SIGILL: u32 = 4;
+pub const SIGFPE: u32 = 8;
 pub const SIGKILL: u32 = 9;
 pub const SIGSEGV: u32 = 11;
 pub const SIGTERM: u32 = 15;
 
 fn signal_name(sig: u32) -> &'static str {
     match sig {
+        SIGILL => "SIGILL",
+        SIGFPE => "SIGFPE",
         SIGKILL => "SIGKILL",
         SIGSEGV => "SIGSEGV",
         SIGTERM => "SIGTERM",

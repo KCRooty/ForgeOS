@@ -5,3 +5,4 @@
 /disk.img
 /partinfo-mbr.img
 /partinfo-gpt.img
+/smoke-test.log
