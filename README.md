@@ -18,32 +18,42 @@ razonamiento completo detrás de cada decisión.
 
 ## Estado
 
-Forge OS arranca, monta un ext2 real y ejecuta programas en C:
+Forge OS arranca, monta un ext2 real y ejecuta programas en C — entre
+ellos su propio shell, que lanza a los demás:
 
 ```
-forge> run /bin/hello
+forge> run /bin/bellows
+Bellows v0 - 'help' para ver las ordenes
+bellows> hello
 hello, forge! (C + mlibc)
-argc=1 argv[0]=/bin/hello
+argc=1 argv[0]=hello
 malloc(65536) OK, checksum=8355840 (esperado 8355840)
 H(100)=5.187378 (esperado 5.187378)
-[run] PID 4 terminó con código 42
+[codigo 42]
+bellows> crash div0
+bellows: crash terminado por SIGFPE
+[codigo 136]
 ```
 
 - **Procesos:** espacios de direcciones propios, `fork`/`execve`/`wait`/
-  `exit`, preemption real por timer en kernel y en ring 3, señales con
-  su acción por defecto (un fallo en un programa mata al programa, no
-  al sistema), Ember como PID 1.
+  `exit`/`kill` utilizables desde C, preemption real por timer en kernel
+  y en ring 3, señales con su acción por defecto (un fallo en un
+  programa mata al programa, no al sistema), Ember como PID 1.
+- **Frontera kernel/usuario:** toda syscall valida los punteros que
+  recibe; uno que no sea del proceso es un `EFAULT`, no un cuelgue ni
+  una fuga de memoria del kernel.
 - **Userland:** [mlibc](https://github.com/managarm/mlibc) portada
-  (parte ANSI C), binarios ELF estáticos cargados desde disco, FPU/SSE
-  por proceso.
+  (ANSI C + POSIX), binarios ELF estáticos cargados desde disco, FPU/SSE
+  por proceso, entrada estándar con edición de línea, y Bellows v0.
 - **Almacenamiento y red:** AHCI, ext2 de solo lectura, escáner GPT/MBR,
   RTL8139 con ARP + ICMP (`ping`).
 - **Pruebas:** `tools/smoke-test.sh` pasa toda la batería en QEMU y
   comprueba la salida.
 
-Lo siguiente: la parte POSIX de mlibc (`fork`/`exec` desde C) y Bellows,
-el shell real. El inventario completo — lo hecho, lo que falta y cada
-bug encontrado por el camino — está en [docs/TODO.md](docs/TODO.md).
+Lo siguiente: tuberías y redirecciones (`dup2`, `pipe`) para que Bellows
+deje de ser un boceto, y que sea Ember quien lo arranque. El inventario
+completo — lo hecho, lo que falta y cada bug encontrado por el camino —
+está en [docs/TODO.md](docs/TODO.md).
 
 ## Referencias de arquitectura estudiadas
 - Asmodeus14/Nyx (Rust, QCLang, motor 3D Gen9.5 hand-rolled)
@@ -96,9 +106,10 @@ make -C userland                        # compila userland/c/*.c
 ./tools/make-test-disk.sh               # los copia a /bin de disk.img
 ```
 
-Desde la consola: `run /bin/hello`, `run /bin/libctest` (autoprueba de
-la libc, código de salida = pruebas fallidas), `run /bin/crash div0`.
-Un `&` final lanza en segundo plano; `wait` espera a que terminen.
+Desde la consola: `run /bin/bellows` abre el shell; `run /bin/libctest`
+y `run /bin/proctest` son las autopruebas de la libc y de procesos
+(código de salida = pruebas fallidas). Un `&` final lanza en segundo
+plano; `wait` espera a que terminen.
 
 ## Pruebas de regresión
 

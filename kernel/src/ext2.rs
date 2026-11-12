@@ -292,3 +292,17 @@ impl Ext2Fs {
         Ok(current)
     }
 }
+
+/// Lee un fichero entero del ext2 del primer disco SATA, por su ruta
+/// absoluta — para quien no tiene una consola a la que informar
+/// (`execve()`). Monta el filesystem en cada llamada: no hay caché de
+/// montaje todavía, y montarlo es leer un sector.
+pub fn read_file(path: &str) -> Result<Vec<u8>, &'static str> {
+    let disk = ahci::first_disk().ok_or("no hay ningún disco SATA listo")?;
+    let fs = Ext2Fs::mount(disk)?;
+    let inode = fs.resolve(path)?;
+    if inode.is_dir() {
+        return Err("es un directorio");
+    }
+    fs.read_inode_data(&inode)
+}

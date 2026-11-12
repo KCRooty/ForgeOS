@@ -44,50 +44,40 @@ pub unsafe fn enter_ring3(entry: u64, user_stack_top: u64) -> ! {
     );
 }
 
-/// Igual que `enter_ring3`, pero fija `RAX` justo antes del `iretq`.
-/// Necesario para el hijo de `fork()`: no llega a ring 3 vía
-/// `sysretq` normal (nunca ejecutó `syscall` él mismo — se fabrica
-/// desde cero, ver `syscall.rs::sys_fork`), así que no hay ningún
-/// `call`/`ret` que deje el valor de retorno en `rax` de forma
-/// natural. Aquí lo ponemos a mano: `rax=0` es la convención de
-/// `fork()` para identificar al hijo (el padre recibe el PID real por
-/// el camino normal, vía el valor de retorno de `syscall_dispatch`).
+/// Entra en ring 3 con TODOS los registros de propósito general tomados
+/// de `context` — el arranque de un programa (todo a cero) o el hijo de
+/// un `fork()`, que debe continuar exactamente donde estaba el padre:
+/// un compilador de C guarda variables vivas en `rbx`/`rbp`/`r12`-`r15`
+/// a través de la llamada a `fork()`, y cuenta con encontrarlas a la
+/// vuelta también en el hijo.
 ///
-/// LIMITACIÓN — esto NO es un fork() de propósito general: solo
-/// `rip`/`rsp`/`rflags`/`rax` se fabrican a mano; el resto de
-/// registros de propósito general (rbx, rcx, rdx, rsi, rdi, rbp,
-/// r8-r15) quedan con lo que haya en la CPU en ese momento (código del
-/// propio kernel), NO con una copia de lo que tenía el padre en el
-/// instante de `fork()`. `elf::TEST_ELF_FORK` funciona porque su
-/// primera instrucción tras `syscall` (`mov ebx, eax`) solo depende de
-/// `rax`, que sí es correcto — un binario real que dependiera de otro
-/// registro justo al volver de `fork()` se rompería. Copiar el resto
-/// de registros del padre (guardados en el `SyscallFrame`, que ya casi
-/// los tiene todos salvo los callee-saved) es la mejora obvia si esto
-/// deja de ser suficiente.
-pub unsafe fn enter_ring3_with_rax(entry: u64, user_stack_top: u64, rax_value: u64) -> ! {
+/// Los desplazamientos son los de `process::UserContext` (`repr(C)`).
+pub unsafe fn enter_ring3_context(context: &crate::process::UserContext) -> ! {
     core::arch::asm!(
         "push {ss}",
-        "push {stack}",
-        "push {flags}",
+        "push qword ptr [rdi + 128]", // rsp
+        "push qword ptr [rdi + 136]", // rflags
         "push {cs}",
-        "push {entry}",
-        "mov rax, {rax_value}",
-        // Igual que en `enter_ring3`: todo a cero menos RAX. (El hijo de
-        // `fork()` debería heredar los registros del padre — limitación
-        // ya documentada arriba; mientras tanto, mejor ceros que restos
-        // del kernel.)
-        "xor ebx, ebx", "xor ecx, ecx", "xor edx, edx",
-        "xor esi, esi", "xor edi, edi", "xor ebp, ebp",
-        "xor r8d, r8d", "xor r9d, r9d", "xor r10d, r10d", "xor r11d, r11d",
-        "xor r12d, r12d", "xor r13d, r13d", "xor r14d, r14d", "xor r15d, r15d",
+        "push qword ptr [rdi + 120]", // rip
+        "mov rax, [rdi + 0]",
+        "mov rbx, [rdi + 8]",
+        "mov rcx, [rdi + 16]",
+        "mov rdx, [rdi + 24]",
+        "mov rsi, [rdi + 32]",
+        "mov rbp, [rdi + 48]",
+        "mov r8,  [rdi + 56]",
+        "mov r9,  [rdi + 64]",
+        "mov r10, [rdi + 72]",
+        "mov r11, [rdi + 80]",
+        "mov r12, [rdi + 88]",
+        "mov r13, [rdi + 96]",
+        "mov r14, [rdi + 104]",
+        "mov r15, [rdi + 112]",
+        "mov rdi, [rdi + 40]", // el último: era el puntero al contexto
         "iretq",
         ss = in(reg) gdt::USER_DATA_SELECTOR as u64,
-        stack = in(reg) user_stack_top,
-        flags = in(reg) 0x202u64,
         cs = in(reg) gdt::USER_CODE_SELECTOR as u64,
-        entry = in(reg) entry,
-        rax_value = in(reg) rax_value,
+        in("rdi") context as *const crate::process::UserContext,
         options(noreturn)
     );
 }

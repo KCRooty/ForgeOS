@@ -3,8 +3,8 @@
 #   make            -> build/hello-asm.elf, build/crt0test.elf
 #                        (ensamblador puro, sin libc; van incrustados
 #                        en el kernel, ver kernel/src/elf.rs)
-#                      build/hello, build/libctest, build/crash,
-#                      build/fpustress   (C + mlibc estática; van a
+#                      build/hello, build/libctest, build/proctest,
+#                      build/bellows...  (C + mlibc estática; van a
 #                        /bin del disco, ver tools/make-test-disk.sh)
 #   make asm        -> solo el de ensamblador (no necesita mlibc)
 #   make clean
@@ -39,7 +39,7 @@ CFLAGS := -target x86_64-elf -ffreestanding -fno-stack-protector -fPIE \
 LDFLAGS := -static --image-base=0xA000000000 -z max-page-size=0x1000 \
            -u frg_panic -u frg_log --strip-all
 
-C_PROGRAMS := hello libctest crash fpustress
+C_PROGRAMS := hello libctest crash fpustress proctest bellows
 
 all: asm c
 asm: $(BUILD)/hello-asm.elf $(BUILD)/crt0test.elf

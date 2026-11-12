@@ -6,9 +6,7 @@
  *   run /bin/crash ud       instrucción ilegal (ud2)       -> SIGILL  (132)
  *   run /bin/crash priv     instrucción privilegiada (hlt) -> SIGSEGV (139)
  *   run /bin/crash stack    recursión infinita             -> SIGSEGV (139)
- *   run /bin/crash abort    abort() de la libc             -> código 255
- *                           (mlibc entra en pánico: abort() necesita
- *                           sigaction/kill, que llegan con la opción POSIX)
+ *   run /bin/crash abort    abort() de la libc             -> SIGABRT (134)
  *
  * Tras cada uno la consola tiene que seguir viva y `ps` sin rastro del
  * proceso.

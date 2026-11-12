@@ -1,9 +1,12 @@
 # meson.build para los sysdeps de ForgeOS en mlibc v7+.
 # build-mlibc.sh lo copia a <mlibc>/sysdeps/forgeos/meson.build.
 
-# Solo ANSI C por ahora: la opción POSIX de mlibc exige sysdeps que el
-# kernel todavía no puede servir (fork/exec/stat/dirs... con su ABI real).
-sysdep_supported_options = {}
+# ANSI C + POSIX. De POSIX el kernel sirve procesos (fork/exec/wait/
+# kill) y poco más; el resto de sysdeps faltan y sus funciones devuelven
+# ENOSYS en tiempo de ejecución — ver forgeos/generic.cpp.
+sysdep_supported_options = {
+	'posix': true,
+}
 
 rtld_sources += files(
 	'generic.cpp',

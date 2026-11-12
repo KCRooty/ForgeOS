@@ -16,12 +16,70 @@ use core::sync::atomic::{AtomicU64, Ordering};
 pub enum ProcessState {
     Running,
     /// Terminado, esperando a que su padre lo recoja con `wait()`
-    /// (`SYS_WAIT`, `syscall.rs::sys_wait`) — `reap_zombie()` lo saca
+    /// (`SYS_WAIT4`, `syscall.rs::sys_wait4`) — `reap_zombie()` lo saca
     /// de la tabla y libera de verdad su espacio de direcciones
-    /// (`mmu::free_address_space`). Si nadie lo recoge, se queda
-    /// zombie para siempre (sin `Ember`/PID 1 todavía, nadie hace de
-    /// padre huérfano-adoptante — ver TODO.md).
+    /// (`mmu::free_address_space`). Los huérfanos los recoge la consola.
+    ///
+    /// El valor es el "wait status" con la codificación de Linux, la que
+    /// `waitpid()` entrega al padre: `exit_status()` o `signal_status()`.
     Zombie(i32),
+}
+
+/// Wait status de un proceso que terminó con `exit(code)`.
+pub const fn exit_status(code: i32) -> i32 {
+    (code & 0xFF) << 8
+}
+
+/// Wait status de un proceso al que mató la señal `sig`.
+pub const fn signal_status(sig: u32) -> i32 {
+    (sig & 0x7F) as i32
+}
+
+/// Señal que mató al proceso, si fue una señal.
+pub const fn status_signal(status: i32) -> Option<u32> {
+    match status & 0x7F {
+        0 => None,
+        sig => Some(sig as u32),
+    }
+}
+
+/// Código "de shell" para mostrar a una persona: el de `exit()`, o
+/// 128 + señal (`139` = SIGSEGV), como hacen bash y compañía.
+pub const fn shell_code(status: i32) -> i32 {
+    match status_signal(status) {
+        Some(sig) => 128 + sig as i32,
+        None => (status >> 8) & 0xFF,
+    }
+}
+
+/// Registros con los que una tarea entra en ring 3 por primera vez — el
+/// arranque de un programa (`spawn_process`: todo a cero salvo
+/// `rip`/`rsp`) o el hijo de un `fork()` (copia exacta de los del padre
+/// en el momento de la syscall, con `rax` = 0).
+///
+/// `ring3::enter_ring3_context` lee los campos por desplazamiento: no
+/// cambiar el orden sin tocar su ensamblador.
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+pub struct UserContext {
+    pub rax: u64,
+    pub rbx: u64,
+    pub rcx: u64,
+    pub rdx: u64,
+    pub rsi: u64,
+    pub rdi: u64,
+    pub rbp: u64,
+    pub r8: u64,
+    pub r9: u64,
+    pub r10: u64,
+    pub r11: u64,
+    pub r12: u64,
+    pub r13: u64,
+    pub r14: u64,
+    pub r15: u64,
+    pub rip: u64,
+    pub rsp: u64,
+    pub rflags: u64,
 }
 
 /// Una entrada de la tabla de descriptores de fichero de un proceso —
@@ -97,6 +155,17 @@ pub struct Pcb {
     /// sin hilos). Se guarda por si algún día hace falta FUTEX_WAKE_OP
     /// al hacer exit(); de momento no se usa de verdad.
     pub tid_ptr: u64,
+    /// Contexto con el que la tarea del scheduler de este proceso debe
+    /// entrar en ring 3 la primera vez que reciba turno; `None` una vez
+    /// consumido. Vive aquí, por proceso, y no en un global: antes había
+    /// un único hueco compartido ("un fork en vuelo a la vez"), y dos
+    /// `fork()` seguidos sin ceder el turno entre medias —lo normal en
+    /// un programa que lanza varios hijos— hacían que el primero
+    /// arrancara con los registros del segundo.
+    pub start: Option<UserContext>,
+    /// Su padre murió antes que él: ya nadie le hará `wait()`. La
+    /// consola recoge a estos en cuanto terminan (`reap_orphans`).
+    pub orphan: bool,
 }
 
 static NEXT_PID: AtomicU64 = AtomicU64::new(1);
@@ -136,6 +205,8 @@ pub fn register(pid: u64, parent_pid: u64, page_table: u64) {
             mmap_next: MMAP_BASE,
             fs_base: 0,
             tid_ptr: 0,
+            start: None,
+            orphan: false,
         });
     }
 }
@@ -167,8 +238,8 @@ pub fn set_page_table(pid: u64, page_table: u64) -> bool {
     false
 }
 
-/// Marca un proceso como zombie con su código de salida. `false` si el
-/// PID no estaba registrado.
+/// Marca un proceso como zombie con su wait status (`exit_status()` o
+/// `signal_status()`). `false` si el PID no estaba registrado.
 pub fn mark_zombie(pid: u64, exit_code: i32) -> bool {
     unsafe {
         for p in (*TABLE.0.get()).iter_mut() {
@@ -195,29 +266,52 @@ pub fn has_children(parent_pid: u64) -> bool {
     unsafe { (*TABLE.0.get()).iter().any(|p| p.parent_pid == parent_pid) }
 }
 
-/// Busca el primer hijo zombie de `parent_pid`, lo saca de la tabla, y
-/// libera de verdad su espacio de direcciones (PML4 + tablas
-/// intermedias + páginas de datos — `mmu::free_address_space`, nunca
-/// se llamaba hasta ahora). `None` si no hay ningún hijo zombie
-/// todavía (puede que sí haya hijos vivos — ver `has_children`).
-pub fn reap_zombie(parent_pid: u64) -> Option<(u64, i32)> {
+/// Busca un hijo zombie de `parent_pid` (cualquiera, o solo `only_pid`
+/// si se indica), lo saca de la tabla, y libera de verdad su espacio de
+/// direcciones (PML4 + tablas intermedias + páginas de datos —
+/// `mmu::free_address_space`). Devuelve su PID y su wait status. `None`
+/// si no hay ninguno todavía (puede que sí haya hijos vivos — ver
+/// `has_children`).
+pub fn reap_zombie(parent_pid: u64, only_pid: Option<u64>) -> Option<(u64, i32)> {
     unsafe {
         let table = &mut *TABLE.0.get();
-        let idx = table
-            .iter()
-            .position(|p| p.parent_pid == parent_pid && matches!(p.state, ProcessState::Zombie(_)))?;
+        let idx = table.iter().position(|p| {
+            p.parent_pid == parent_pid
+                && only_pid.map_or(true, |pid| p.pid == pid)
+                && matches!(p.state, ProcessState::Zombie(_))
+        })?;
         let pcb = table.remove(idx);
-        let ProcessState::Zombie(code) = pcb.state else {
+        let ProcessState::Zombie(status) = pcb.state else {
             unreachable!("filtrado por posición arriba")
         };
         crate::mmu::free_address_space(pcb.page_table);
-        Some((pcb.pid, code))
+        Some((pcb.pid, status))
+    }
+}
+
+/// `true` si `pid` existe y es hijo de `parent_pid`.
+pub fn is_child(parent_pid: u64, pid: u64) -> bool {
+    unsafe { (*TABLE.0.get()).iter().any(|p| p.pid == pid && p.parent_pid == parent_pid) }
+}
+
+/// Entrega a `new_parent` todos los hijos de `pid` (vivos o zombies).
+/// Al morir un proceso sus hijos no pueden quedarse apuntando a un PID
+/// que ya no existe (y que acabará reutilizándose): pasan a la consola
+/// (PID 0), que recoge a los huérfanos antes de cada prompt.
+pub fn reparent_children(pid: u64, new_parent: u64) {
+    unsafe {
+        for p in (*TABLE.0.get()).iter_mut() {
+            if p.parent_pid == pid {
+                p.parent_pid = new_parent;
+                p.orphan = true;
+            }
+        }
     }
 }
 
 /// Recoge un proceso zombie CONCRETO por PID: lo saca de la tabla,
 /// libera su espacio de direcciones y devuelve su código de salida.
-/// `None` si el PID no existe o sigue vivo. Es el `waitpid(pid)` de
+/// `None` si el PID no existe o sigue vivo. Devuelve el wait status. Es el `waitpid(pid)` de
 /// quien no es un proceso — la consola de depuración (PID 0), que lanza
 /// programas en primer plano con `run` y no puede usar `reap_zombie`
 /// (recogería el primer zombie huérfano que hubiera, no el suyo).
@@ -234,39 +328,58 @@ pub fn reap_pid(pid: u64) -> Option<i32> {
     }
 }
 
-// --- lanzamiento del primer proceso de una demo (no un fork) ---
-//
-// Mismo patrón de "slot de handoff único" que `syscall::sys_fork` usa
-// para el hijo: `scheduler::spawn_with_space` solo acepta un `fn() -> !`
-// sin argumentos, así que la única forma de pasarle datos a la tarea
-// nueva es dejarlos en globales que ella lea nada más arrancar.
-
-static mut LAUNCH_ENTRY: u64 = 0;
-static mut LAUNCH_STACK: u64 = 0;
-
-fn launch_trampoline() -> ! {
+/// Recoge todos los huérfanos que ya hayan terminado (ver `Pcb::orphan`)
+/// y libera su memoria. Devuelve cuántos.
+pub fn reap_orphans() -> usize {
     unsafe {
-        let entry = LAUNCH_ENTRY;
-        let stack = LAUNCH_STACK;
-        // `current_pid()` ya lo dejó puesto el scheduler (`yield_now`,
-        // con `Task::pid`) antes de saltar aquí — no hace falta
-        // fijarlo a mano.
-        crate::ring3::enter_ring3(entry, stack);
+        let table = &mut *TABLE.0.get();
+        let mut reaped = 0;
+        let mut i = 0;
+        while i < table.len() {
+            if table[i].orphan && matches!(table[i].state, ProcessState::Zombie(_)) {
+                let pcb = table.remove(i);
+                crate::mmu::free_address_space(pcb.page_table);
+                reaped += 1;
+            } else {
+                i += 1;
+            }
+        }
+        reaped
+    }
+}
+
+// --- primera entrada en ring 3 de una tarea de proceso ---
+
+/// Punto de entrada, en el scheduler, de toda tarea de proceso nueva
+/// (`spawn_process` y el hijo de `fork()`): recoge el `UserContext` que
+/// su creador dejó en el PCB y salta a ring 3 con él.
+pub fn user_task_trampoline() -> ! {
+    // `current_pid()` ya lo dejó puesto el scheduler (`yield_now`, con
+    // `Task::pid`) antes de saltar aquí.
+    let pid = current_pid();
+    let context = with_pid_mut(pid, |pcb| pcb.start.take()).flatten();
+    match context {
+        Some(context) => unsafe { crate::ring3::enter_ring3_context(&context) },
+        None => panic!("tarea del PID {} sin contexto de arranque", pid),
     }
 }
 
 /// Da de alta y arranca un proceso nuevo desde cero (no un `fork()`)
-/// como tarea del scheduler. Pensado para el primer proceso de una
-/// demo de consola (`forktest`, `exec`) o para el arranque automático
-/// de `Ember` (PID 1) desde `main.rs` — el camino normal de un sistema
-/// real, una vez Ember pueda lanzar servicios reales, es que todo lo
-/// demás nazca de `fork()`+`execve()` desde él, no de aquí.
+/// como tarea del scheduler. Pensado para lo que lanza el propio kernel
+/// (la consola con `run`, los `*test`, o Ember al arrancar) — todo lo
+/// demás nace de `fork()`+`execve()`.
 pub unsafe fn spawn_process(entry_point: u64, user_stack_top: u64, page_table: u64, parent_pid: u64) -> u64 {
     let pid = alloc_pid();
     register(pid, parent_pid, page_table);
-    LAUNCH_ENTRY = entry_point;
-    LAUNCH_STACK = user_stack_top;
-    crate::scheduler::spawn_with_space(launch_trampoline, page_table, pid);
+    with_pid_mut(pid, |pcb| {
+        pcb.start = Some(UserContext {
+            rip: entry_point,
+            rsp: user_stack_top,
+            rflags: 0x202, // IF=1 + el bit reservado que siempre va a 1
+            ..UserContext::default()
+        });
+    });
+    crate::scheduler::spawn_with_space(user_task_trampoline, page_table, pid);
     pid
 }
 

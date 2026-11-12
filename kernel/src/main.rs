@@ -36,6 +36,8 @@ mod ring3;
 mod rtl8139;
 mod syscall;
 mod tls;
+mod tty;
+mod usercopy;
 mod vfs;
 mod scheduler;
 mod serial;
