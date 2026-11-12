@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 """Forge OS — arranca QEMU sin pantalla y teclea comandos en la consola
-de depuración por el puerto serie, esperando al prompt `forge>` antes de
-cada uno. Imprime el log de serie completo.
+de depuración por el puerto serie, esperando al prompt (`forge>`, o
+`bellows>` si se ha lanzado el shell) antes de cada uno. Imprime el log
+de serie completo.
 
     tools/qemu-console.py "run /bin/hello" ps meminfo
+    tools/qemu-console.py "run /bin/bellows" "hello" "exit"
 
 Con --expect TEXTO (repetible) comprueba además que cada TEXTO aparece
 en la salida, en ese orden; sale con código 1 si falta alguno, si un
@@ -21,7 +23,9 @@ import sys
 import time
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-PROMPT = b"forge> "
+# La consola del kernel y Bellows (el shell de ring 3): tras cada comando
+# se espera a que aparezca cualquiera de los dos.
+PROMPTS = (b"forge> ", b"bellows> ")
 FATAL = (b"[PANIC]", b"[FATAL]")
 
 
@@ -63,7 +67,7 @@ def main():
         while True:
             if any(marker in log[start:] for marker in FATAL):
                 return "el kernel entró en pánico"
-            if PROMPT in log[start:]:
+            if any(prompt in log[start:] for prompt in PROMPTS):
                 return None
             remaining = deadline - time.monotonic()
             if remaining <= 0:

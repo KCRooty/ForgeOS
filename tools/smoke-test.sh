@@ -36,6 +36,9 @@ COMMANDS=(
     "run /bin/crash null" "run /bin/crash div0" "run /bin/crash ud"
     "run /bin/crash priv" "run /bin/crash stack"
     "run /bin/hello"
+    "run /bin/proctest"
+    # Una sesión de Bellows (el shell de ring 3), tecleada por su stdin.
+    "run /bin/bellows" "hello" "crash null" "noexiste" "exit 5"
     ps
 )
 
@@ -77,6 +80,14 @@ EXPECT=(
     "terminado por la señal 11 (código 139)"
     # ...y el sistema sigue ejecutando programas después
     "terminó con código 42"
+    # procesos desde C: fork/exec/wait/kill y punteros inválidos
+    "proctest: TODO OK"
+    # Bellows: stdin real + fork/exec/wait por cada orden
+    "Bellows v0"
+    "[codigo 42]"
+    "bellows: crash terminado por SIGSEGV"
+    "bellows: noexiste: orden no encontrada"
+    "terminó con código 5"
 )
 
 ARGS=(--timeout 120)
@@ -92,7 +103,7 @@ for round in $(seq 1 "$ROUNDS"); do
     for needle in "fpustress[1]: OK" "fpustress[2]: OK" "fpustress[3]: OK"; do
         grep -qF "$needle" "$LOG" || { echo "FALLO en la pasada $round/$ROUNDS — no aparece: $needle (log en $LOG)"; exit 1; }
     done
-    if grep -qE "  FALLO  |crt0test: FALLO|fpustress\[[0-9]+\]: FALLO" "$LOG"; then
+    if grep -qE "  FALLO  |crt0test: FALLO|fpustress\[[0-9]+\]: FALLO|\[PANIC\]|\[FATAL\]" "$LOG"; then
         echo "FALLO en la pasada $round/$ROUNDS — una prueba informó de error (log en $LOG)"
         grep -nE "FALLO" "$LOG"
         exit 1

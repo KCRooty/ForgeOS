@@ -26,7 +26,9 @@
 
 use crate::{mmu, process, scheduler, serial_println};
 
+pub const SIGINT: u32 = 2;
 pub const SIGILL: u32 = 4;
+pub const SIGABRT: u32 = 6;
 pub const SIGFPE: u32 = 8;
 pub const SIGKILL: u32 = 9;
 pub const SIGSEGV: u32 = 11;
@@ -34,7 +36,9 @@ pub const SIGTERM: u32 = 15;
 
 fn signal_name(sig: u32) -> &'static str {
     match sig {
+        SIGINT => "SIGINT",
         SIGILL => "SIGILL",
+        SIGABRT => "SIGABRT",
         SIGFPE => "SIGFPE",
         SIGKILL => "SIGKILL",
         SIGSEGV => "SIGSEGV",
@@ -77,7 +81,8 @@ pub fn deliver_default(pid: u64, sig: u32) -> bool {
     if pid != process::current_pid() {
         unsafe { mmu::free_address_space(pcb.page_table) };
     }
-    process::mark_zombie(pid, 128 + sig as i32);
+    process::mark_zombie(pid, process::signal_status(sig));
+    process::reparent_children(pid, 0);
     scheduler::mark_finished_by_pid(pid);
     true
 }

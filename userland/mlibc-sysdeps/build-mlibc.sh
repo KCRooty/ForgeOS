@@ -73,7 +73,7 @@ MESON_ARGS=(
     --buildtype release
     -Ddefault_library=static
     -Dlibgcc_dependency=false
-    -Dposix_option=disabled
+    -Dposix_option=enabled
     -Dlinux_option=disabled
     -Dglibc_option=disabled
     -Dbsd_option=disabled

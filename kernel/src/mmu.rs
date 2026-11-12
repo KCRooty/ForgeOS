@@ -383,6 +383,32 @@ pub unsafe fn translate(p4: u64, virt: u64) -> Option<u64> {
     Some((leaf_entry & ADDR_MASK) + (virt & 0xFFF))
 }
 
+/// `true` si `virt` está mapeada en `p4` como página accesible desde
+/// ring 3 (bit U/S en los cuatro niveles) y, si `write`, escribible.
+/// Es la comprobación en la que se apoya `usercopy.rs` antes de tocar
+/// cualquier puntero que venga de un proceso.
+pub unsafe fn user_page_ok(p4: u64, virt: u64, write: bool) -> bool {
+    let mut required = PAGE_PRESENT | PAGE_USER;
+    if write {
+        required |= PAGE_WRITABLE;
+    }
+    let mut table = p4;
+    for level in (0..=3u8).rev() {
+        let entry = *((table + (table_index(virt, level) as u64) * 8) as *const u64);
+        if entry & required != required {
+            return false;
+        }
+        if level == 0 {
+            return true;
+        }
+        if entry & PAGE_HUGE != 0 {
+            return false; // ningún mapeo de proceso usa huge pages
+        }
+        table = entry & ADDR_MASK;
+    }
+    false
+}
+
 /// Amplía los permisos de una página YA mapeada en `p4`: añade escritura
 /// si `writable`, y quita NO_EXECUTE si `executable`. Nunca retira un
 /// permiso que la página ya tuviera. No hace nada si no está mapeada.

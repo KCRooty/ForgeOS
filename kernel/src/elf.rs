@@ -391,7 +391,7 @@ pub const TEST_ELF_FORK_WAIT: [u8; 189] = [
     // --- padre (offset 38) ---
     0x89, 0xC3,                   // mov ebx, eax  (PID del hijo, de fork())
     0x31, 0xFF,                   // xor edi, edi  (wait(NULL))
-    0xB8, 0x3D, 0x00, 0x00, 0x00, // mov eax, 61  (SYS_WAIT)
+    0xB8, 0x3D, 0x00, 0x00, 0x00, // mov eax, 61  (SYS_WAIT4)
     0x0F, 0x05,                   // syscall
     0x89, 0xC7,                   // mov edi, eax  (PID recogido -> ping)
     0xB8, 0x01, 0x00, 0x00, 0x00, // mov eax, 1   (SYS_PING)
@@ -457,7 +457,7 @@ pub const TEST_ELF_EMBER: [u8; 284] = [
     // --- padre_r1 ---
     0x89, 0xC3,                   // mov ebx, eax  (PID del hijo, informativo)
     0x31, 0xFF,                   // xor edi, edi  (wait(NULL))
-    0xB8, 0x3D, 0x00, 0x00, 0x00, // mov eax, 61  (SYS_WAIT)
+    0xB8, 0x3D, 0x00, 0x00, 0x00, // mov eax, 61  (SYS_WAIT4)
     0x0F, 0x05,                   // syscall
     0x89, 0xC7,                   // mov edi, eax  (PID recogido -> ping)
     0xB8, 0x01, 0x00, 0x00, 0x00, // mov eax, 1   (SYS_PING)
@@ -477,7 +477,7 @@ pub const TEST_ELF_EMBER: [u8; 284] = [
     // --- padre_r2 ---
     0x89, 0xC3,                   // mov ebx, eax  (PID del hijo, informativo)
     0x31, 0xFF,                   // xor edi, edi  (wait(NULL))
-    0xB8, 0x3D, 0x00, 0x00, 0x00, // mov eax, 61  (SYS_WAIT)
+    0xB8, 0x3D, 0x00, 0x00, 0x00, // mov eax, 61  (SYS_WAIT4)
     0x0F, 0x05,                   // syscall
     0x89, 0xC7,                   // mov edi, eax  (PID recogido -> ping)
     0xB8, 0x01, 0x00, 0x00, 0x00, // mov eax, 1   (SYS_PING)
@@ -560,8 +560,9 @@ pub const TEST_ELF_KILL: [u8; 187] = [
     0x89, 0xC7,                   // mov edi, eax  (resultado de kill() -> ping)
     0xB8, 0x01, 0x00, 0x00, 0x00, // mov eax, 1   (SYS_PING)
     0x0F, 0x05,                   // syscall
-    0x31, 0xFF,                   // xor edi, edi  (wait(NULL))
-    0xB8, 0x3D, 0x00, 0x00, 0x00, // mov eax, 61  (SYS_WAIT)
+    0x31, 0xF6,                   // xor esi, esi  (wait4(0, NULL): rdi ya es 0, el
+                                  // resultado de kill(); rsi traía el 15 de SIGTERM)
+    0xB8, 0x3D, 0x00, 0x00, 0x00, // mov eax, 61  (SYS_WAIT4)
     0x0F, 0x05,                   // syscall
     0x89, 0xC7,                   // mov edi, eax  (PID recogido -> ping)
     0xB8, 0x01, 0x00, 0x00, 0x00, // mov eax, 1   (SYS_PING)

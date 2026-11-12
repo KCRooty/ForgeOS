@@ -29,6 +29,8 @@ pub fn run() -> ! {
     loop {
         // Trabajos de `run ... &` que hayan terminado entretanto.
         reap_background(&mut port, false);
+        // Y los huérfanos: procesos cuyo padre murió sin esperarlos.
+        process::reap_orphans();
         let _ = write!(port, "{}", PROMPT);
         let line = read_line(&mut port);
         dispatch(&mut port, line.trim());
@@ -59,13 +61,17 @@ fn reap_background(port: &mut SerialPort, block: bool) {
     }
 }
 
-/// Mensaje de fin de un proceso lanzado con `run`. Un código 128+N con
-/// N una señal conocida es la convención de `signal::deliver_default`.
-fn report_exit(port: &mut SerialPort, pid: u64, code: i32) {
-    if (129..=128 + 31).contains(&code) {
-        let _ = write!(port, "[run] PID {} terminado por la señal {} (código {})\r\n", pid, code - 128, code);
-    } else {
-        let _ = write!(port, "[run] PID {} terminó con código {}\r\n", pid, code);
+/// Mensaje de fin de un proceso lanzado con `run`, a partir de su wait
+/// status.
+fn report_exit(port: &mut SerialPort, pid: u64, status: i32) {
+    let code = process::shell_code(status);
+    match process::status_signal(status) {
+        Some(sig) => {
+            let _ = write!(port, "[run] PID {} terminado por la señal {} (código {})\r\n", pid, sig, code);
+        }
+        None => {
+            let _ = write!(port, "[run] PID {} terminó con código {}\r\n", pid, code);
+        }
     }
 }
 
@@ -259,7 +265,9 @@ fn dispatch(port: &mut SerialPort, line: &str) {
             for p in process::list() {
                 let estado: alloc::string::String = match p.state {
                     process::ProcessState::Running => alloc::string::String::from("running"),
-                    process::ProcessState::Zombie(code) => alloc::format!("zombie(code={})", code),
+                    process::ProcessState::Zombie(status) => {
+                        alloc::format!("zombie(code={})", process::shell_code(status))
+                    }
                 };
                 let _ = write!(port, "{:<4} {:<5} {}\r\n", p.pid, p.parent_pid, estado);
             }
