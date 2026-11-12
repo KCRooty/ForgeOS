@@ -2,13 +2,23 @@
 //
 // Syscalls que divergen de Linux x86_64:
 //   SYS_WRITE = 63  (Linux usa 1)
-// El resto coincide con Linux x86_64.
+// El resto coincide con Linux x86_64 (numeración y convención: errno
+// negativo en rax).
+//
+// Los sysdeps que el kernel todavía no puede servir devuelven ENOSYS
+// aquí mismo, sin syscall — están señalados uno a uno más abajo.
 
 #include <mlibc/all-sysdeps.hpp>
+#include <mlibc/fsfd_target.hpp>
 #include <mlibc/tcb.hpp>
 #include <string.h>
 #include <errno.h>
+#include <signal.h>
 #include <time.h>
+#include <sys/resource.h>
+#include <sys/socket.h>
+#include <sys/stat.h>
+#include <sys/types.h>
 
 // mmap constants (x86_64, same as Linux — defined inline to avoid sys/mman.h POSIX dep)
 #ifndef PROT_READ
@@ -159,6 +169,101 @@ int Sysdeps<ClockGet>::operator()(int clock_id, time_t *secs, long *nanos) {
 
 int Sysdeps<Isatty>::operator()(int) {
     return 0; // siempre true (todo es tty por ahora)
+}
+
+// ── Procesos (opción POSIX, M12) ─────────────────────────────────────────────
+
+int Sysdeps<Fork>::operator()(pid_t *child) {
+    long r = forge_syscall(57);
+    if (r < 0) return static_cast<int>(-r);
+    *child = static_cast<pid_t>(r);
+    return 0;
+}
+
+// envp se pasa pero el kernel todavía lo ignora: el programa nuevo
+// arranca sin variables de entorno.
+int Sysdeps<Execve>::operator()(const char *path, char *const argv[], char *const envp[]) {
+    long r = forge_syscall(59,
+        reinterpret_cast<long>(path),
+        reinterpret_cast<long>(argv),
+        reinterpret_cast<long>(envp));
+    return static_cast<int>(-r); // solo vuelve si falló
+}
+
+// wait4(pid, status, options, rusage) — rusage no se rellena.
+int Sysdeps<Waitpid>::operator()(pid_t pid, int *status, int flags, struct rusage *ru, pid_t *ret_pid) {
+    if (ru) memset(ru, 0, sizeof(*ru));
+    long r = forge_syscall(61, pid, reinterpret_cast<long>(status), flags, 0);
+    if (r < 0) return static_cast<int>(-r);
+    *ret_pid = static_cast<pid_t>(r);
+    return 0;
+}
+
+void Sysdeps<Yield>::operator()() {
+    forge_syscall(24);
+}
+
+pid_t Sysdeps<GetPid>::operator()() {
+    return static_cast<pid_t>(forge_syscall(39));
+}
+
+pid_t Sysdeps<GetPpid>::operator()() {
+    return static_cast<pid_t>(forge_syscall(110));
+}
+
+// Sin hilos: el TID es el PID.
+pid_t Sysdeps<GetTid>::operator()() {
+    return static_cast<pid_t>(forge_syscall(39));
+}
+
+int Sysdeps<Kill>::operator()(pid_t pid, int sig) {
+    long r = forge_syscall(62, pid, sig);
+    return r < 0 ? static_cast<int>(-r) : 0;
+}
+
+// ── Señales ──────────────────────────────────────────────────────────────────
+//
+// El kernel solo conoce la acción por defecto de cada señal (terminar el
+// proceso). Pedir esa acción, o consultar la actual, funciona; instalar
+// un manejador propio todavía no (ENOSYS). Con esto abort() ya hace lo
+// que debe: restablece SIGABRT y se la envía a sí mismo.
+
+int Sysdeps<Sigaction>::operator()(int, const struct sigaction *__restrict act, struct sigaction *__restrict old) {
+    if (old) {
+        memset(old, 0, sizeof(*old));
+        old->sa_handler = SIG_DFL;
+    }
+    if (act && act->sa_handler != SIG_DFL)
+        return ENOSYS;
+    return 0;
+}
+
+// rt_sigprocmask: el kernel lo acepta y no hace nada (no hay señales
+// que bloquear mientras no existan manejadores).
+int Sysdeps<Sigprocmask>::operator()(int how, const sigset_t *__restrict set, sigset_t *__restrict retrieve) {
+    if (retrieve) memset(retrieve, 0, sizeof(*retrieve));
+    long r = forge_syscall(14, how, reinterpret_cast<long>(set), 0, 8);
+    return r < 0 ? static_cast<int>(-r) : 0;
+}
+
+// ── Ficheros ─────────────────────────────────────────────────────────────────
+
+// Solo fstat(fd): el kernel no tiene todavía stat() por ruta.
+int Sysdeps<Stat>::operator()(fsfd_target fsfdt, int fd, const char *, int, struct stat *statbuf) {
+    if (fsfdt != fsfd_target::fd)
+        return ENOSYS;
+    long r = forge_syscall(5, fd, reinterpret_cast<long>(statbuf));
+    return r < 0 ? static_cast<int>(-r) : 0;
+}
+
+// mlibc exige estos dos para compilar su parte POSIX; el kernel no tiene
+// ni dup2() ni sockets.
+int Sysdeps<Dup2>::operator()(int, int, int) {
+    return ENOSYS;
+}
+
+int Sysdeps<Recvfrom>::operator()(int, void *, size_t, int, struct sockaddr *, socklen_t *, ssize_t *) {
+    return ENOSYS;
 }
 
 } // namespace mlibc

@@ -86,7 +86,9 @@ pub const SYS_GETPID: u64 = 39;
 pub const SYS_FORK: u64 = 57;
 pub const SYS_EXECVE: u64 = 59;
 pub const SYS_EXIT: u64 = 60;
-pub const SYS_WAIT: u64 = 61; // == wait4 en Linux x86_64; no hay "wait" clásica en esa ABI
+pub const SYS_WAIT4: u64 = 61;            // wait4(pid, *status, options, *rusage)
+pub const SYS_SCHED_YIELD: u64 = 24;      // M12
+pub const SYS_GETPPID: u64 = 110;         // M12
 pub const SYS_KILL: u64 = 62;
 pub const SYS_LSEEK: u64 = 8;             // M11 — lseek(fd, offset, whence)
 pub const SYS_FSTAT: u64 = 5;             // M8d — fstat(fd, *stat)
@@ -112,6 +114,12 @@ pub const ARCH_GET_FS: u64 = 0x1003;
 const ENOSYS: u64 = (-38i64) as u64;
 const EINVAL: u64 = (-22i64) as u64;
 const ENOENT: u64 = (-2i64) as u64;
+const ESRCH: u64 = (-3i64) as u64;
+const ECHILD: u64 = (-10i64) as u64;
+const E2BIG: u64 = (-7i64) as u64;
+const ENOEXEC: u64 = (-8i64) as u64;
+const ENOMEM: u64 = (-12i64) as u64;
+use crate::usercopy::{self, EFAULT};
 const EBADF: u64 = (-9i64) as u64;
 const ESPIPE: u64 = (-29i64) as u64;
 
@@ -143,20 +151,20 @@ pub struct SyscallFrame {
     pub arg5: u64,
     pub user_rflags: u64,
     pub user_rip: u64,
+    /// Registros que la ABI SysV obliga a conservar a través de una
+    /// llamada. Ninguna syscall los necesita como argumento, pero
+    /// `fork()` sí: el hijo tiene que arrancar con los mismos valores
+    /// que el padre (ver `sys_fork`).
+    pub rbx: u64,
+    pub rbp: u64,
+    pub r12: u64,
+    pub r13: u64,
+    pub r14: u64,
+    pub r15: u64,
     /// RSP de usuario en el momento del `syscall`, guardado en la pila
     /// de kernel de ESTA tarea — ver `syscall_entry`.
     pub user_rsp: u64,
 }
-
-/// Handoff para el hijo de `fork()` — el mismo patrón de "slot global
-/// único" que `USER_RSP_SCRATCH`: solo soporta un `fork()` en vuelo a
-/// la vez (cooperativo, sin SMP, ver `docs/MEGADOC.md` §errores
-/// conocidos). El trampolín que arranca la tarea del hijo en el
-/// scheduler lee esto inmediatamente, antes de que un `fork()`
-/// distinto pueda pisarlo.
-static mut FORK_CHILD_PID: u64 = 0;
-static mut FORK_CHILD_RIP: u64 = 0;
-static mut FORK_CHILD_RSP: u64 = 0;
 
 unsafe fn read_msr(msr: u32) -> u64 {
     let (hi, lo): (u32, u32);
@@ -215,6 +223,12 @@ pub unsafe extern "C" fn syscall_entry() {
         "mov [{user_rsp}], rsp",
         "mov rsp, [{stack_top}]",
         "push qword ptr [{user_rsp}]", // RSP de usuario, a salvo en la pila de esta tarea
+        "push r15", // callee-saved: solo los lee `fork()`, ver `SyscallFrame`
+        "push r14",
+        "push r13",
+        "push r12",
+        "push rbp",
+        "push rbx",
         "push rcx", // RIP de retorno a ring 3, puesto por `syscall`
         "push r11", // RFLAGS de usuario, puesto por `syscall`
         "push r9",
@@ -237,6 +251,12 @@ pub unsafe extern "C" fn syscall_entry() {
         "pop r9",
         "pop r11",
         "pop rcx",
+        "pop rbx",
+        "pop rbp",
+        "pop r12",
+        "pop r13",
+        "pop r14",
+        "pop r15",
         "pop rsp", // RSP de usuario de ESTA tarea
         "sysretq",
         user_rsp = sym USER_RSP_SCRATCH,
@@ -299,7 +319,12 @@ extern "C" fn syscall_dispatch(frame: *mut SyscallFrame) -> u64 {
             sys_execve(frame)
         }
         SYS_EXIT => sys_exit(frame),
-        SYS_WAIT => sys_wait(frame),
+        SYS_WAIT4 => sys_wait4(frame),
+        SYS_SCHED_YIELD => {
+            scheduler::yield_now();
+            0
+        }
+        SYS_GETPPID => process::find(process::current_pid()).map(|p| p.parent_pid).unwrap_or(0),
         SYS_KILL => sys_kill(frame),
         SYS_FSTAT => sys_fstat(frame),
         SYS_LSEEK => sys_lseek(frame),
@@ -316,11 +341,16 @@ extern "C" fn syscall_dispatch(frame: *mut SyscallFrame) -> u64 {
 
 /// `fork()` — clona el proceso actual: nuevo PID, copia profunda del
 /// espacio de direcciones (`mmu::clone_address_space`), y una tarea de
-/// scheduler nueva para el hijo. El padre recibe el PID del hijo por
-/// el camino normal (el valor de retorno de esta función se convierte
-/// en `rax` en `syscall_entry`, vía `sysretq`, igual que `SYS_PING`).
-/// El hijo NO vuelve por aquí — arranca en `fork_child_trampoline`,
-/// ver su comentario.
+/// scheduler nueva para el hijo. El padre recibe el PID del hijo por el
+/// camino normal (`rax` vía `sysretq`).
+///
+/// El hijo no pasa por aquí: su tarea arranca en
+/// `process::user_task_trampoline`, que entra en ring 3 con una copia de
+/// TODOS los registros del padre en el instante de la syscall y `rax` =
+/// 0. Hereda además lo que un programa en C da por hecho que sobrevive
+/// a un `fork()`: descriptores abiertos, límites del heap y del arena de
+/// `mmap()` (sin ellos su primer `malloc` intentaría mapear encima de
+/// páginas que ya tiene), el puntero de TLS y el estado FPU/SSE.
 fn sys_fork(frame: &SyscallFrame) -> u64 {
     let parent_pid = process::current_pid();
     let parent = match process::find(parent_pid) {
@@ -338,21 +368,52 @@ fn sys_fork(frame: &SyscallFrame) -> u64 {
         Some(p4) => p4,
         None => {
             serial_println!("[syscall] fork: sin memoria física para clonar el espacio de direcciones");
-            return u64::MAX;
+            return ENOMEM;
         }
     };
 
     let child_pid = process::alloc_pid();
     process::register(child_pid, parent_pid, child_p4);
 
-    // Handoff de un solo slot hacia fork_child_trampoline — ver su
-    // aviso de "un fork en vuelo a la vez".
-    unsafe {
-        FORK_CHILD_PID = child_pid;
-        FORK_CHILD_RIP = frame.user_rip;
-        FORK_CHILD_RSP = frame.user_rsp;
-    }
-    scheduler::spawn_with_space(fork_child_trampoline, child_p4, child_pid);
+    let context = process::UserContext {
+        rax: 0, // lo que `fork()` devuelve en el hijo
+        rbx: frame.rbx,
+        // `syscall` deja en rcx/r11 el RIP y los RFLAGS de retorno; el
+        // padre los verá así al volver por `sysretq`, y el hijo igual.
+        rcx: frame.user_rip,
+        rdx: frame.arg2,
+        rsi: frame.arg1,
+        rdi: frame.arg0,
+        rbp: frame.rbp,
+        r8: frame.arg4,
+        r9: frame.arg5,
+        r10: frame.arg3,
+        r11: frame.user_rflags,
+        r12: frame.r12,
+        r13: frame.r13,
+        r14: frame.r14,
+        r15: frame.r15,
+        rip: frame.user_rip,
+        rsp: frame.user_rsp,
+        rflags: frame.user_rflags | 0x200, // con interrupciones, siempre
+    };
+    let fs_base = tls::read_fs_base();
+    process::with_pid_mut(child_pid, |child| {
+        child.fds = parent.fds.clone();
+        child.heap_top = parent.heap_top;
+        child.heap_mapped_end = parent.heap_mapped_end;
+        child.mmap_next = parent.mmap_next;
+        child.fs_base = fs_base;
+        child.tid_ptr = parent.tid_ptr;
+        child.start = Some(context);
+    });
+
+    scheduler::spawn_with_space(process::user_task_trampoline, child_p4, child_pid);
+    // El estado FPU/SSE del padre, tal cual está ahora mismo en la CPU
+    // (el kernel no lo toca): modo de redondeo, registros XMM vivos...
+    let mut fpu = tls::FxState::new();
+    unsafe { tls::fxsave(&mut fpu) };
+    scheduler::set_task_fpu(child_pid, fpu);
 
     serial_println!(
         "[syscall] fork: PID {} -> hijo PID {} (PML4 nuevo @ 0x{:x})",
@@ -364,23 +425,6 @@ fn sys_fork(frame: &SyscallFrame) -> u64 {
     child_pid
 }
 
-/// Punto de entrada del hijo de `fork()` como tarea nueva del
-/// scheduler. No llega aquí por `sysretq` (nunca ejecutó `syscall` él
-/// mismo) — por eso hace falta `enter_ring3_with_rax` en vez del
-/// camino normal: fabrica desde cero el mismo punto de retorno que
-/// tendría el padre (mismo RIP/RSP de usuario, capturados en
-/// `sys_fork` desde el `SyscallFrame`/`USER_RSP_SCRATCH` del padre),
-/// pero con `rax=0` — la convención de `fork()` para el hijo.
-fn fork_child_trampoline() -> ! {
-    unsafe {
-        // `current_pid()` ya lo dejó puesto el scheduler (`yield_now`,
-        // con `Task::pid`) antes de saltar aquí.
-        let rip = FORK_CHILD_RIP;
-        let rsp = FORK_CHILD_RSP;
-        ring3::enter_ring3_with_rax(rip, rsp, 0);
-    }
-}
-
 /// `exit()` — marca el proceso actual como zombie y cede el turno para
 /// siempre. Su padre lo recoge con `wait()` (`sys_wait`, más abajo),
 /// que también libera de verdad la memoria del hijo — suficiente para
@@ -390,7 +434,8 @@ fn sys_exit(frame: &SyscallFrame) -> ! {
     let pid = process::current_pid();
     // Solo los 8 bits bajos, como en POSIX: `exit(-1)` es el código 255.
     let code = (frame.arg0 & 0xFF) as i32;
-    process::mark_zombie(pid, code);
+    process::mark_zombie(pid, process::exit_status(code));
+    process::reparent_children(pid, 0);
     serial_println!("[syscall] exit: PID {} terminó con código {}", pid, code);
     scheduler::mark_current_finished();
     // `exit()` diverge a propósito: nunca llega al `sysretq` de
@@ -408,36 +453,62 @@ fn sys_exit(frame: &SyscallFrame) -> ! {
     }
 }
 
-/// `wait()` — espera a que termine un hijo y recoge su código de
-/// salida. `arg0` = puntero de usuario a un `i32` donde escribir el
-/// código de salida (0/NULL para ignorarlo, como `wait(NULL)` en
-/// POSIX). Devuelve el PID del hijo recogido, o `u64::MAX` si el
-/// proceso llamante no tiene NINGÚN hijo (vivo o muerto) — equivalente
-/// a ECHILD, no tiene sentido esperar.
+/// `wait4(pid, status, options, rusage)` — con la ABI de Linux, que es
+/// la que usa `waitpid()` de mlibc:
 ///
-/// Bloqueante de verdad, sin ninguna primitiva de sincronización
-/// nueva: si hay hijos pero ninguno es zombie todavía, cede el turno
-/// en bucle (`scheduler::yield_now()`) — mismo patrón cooperativo que
-/// ya usa `exit()`. El hijo es una tarea más del scheduler, así que el
-/// round-robin acaba llegando a él, dejándolo correr hasta su propio
-/// `exit()` — la vuelta siguiente de este bucle lo encuentra zombie.
-fn sys_wait(frame: &SyscallFrame) -> u64 {
+/// - `pid` > 0 espera a ese hijo concreto; -1 (o 0: no hay grupos de
+///   procesos) a cualquiera.
+/// - `status`, si no es NULL, recibe el wait status (`WIFEXITED`,
+///   `WEXITSTATUS`, `WIFSIGNALED`, `WTERMSIG`...).
+/// - `options`: `WNOHANG` (1) devuelve 0 en vez de esperar si ningún
+///   hijo ha terminado todavía.
+/// - `rusage` se ignora.
+///
+/// Devuelve el PID recogido, o `-ECHILD` si no hay a quién esperar.
+/// Recoger a un hijo libera de verdad su memoria.
+///
+/// Bloqueante sin ninguna primitiva de sincronización nueva: si hay
+/// hijos pero ninguno es zombie todavía, cede el turno en bucle
+/// (`scheduler::yield_now()`), mismo patrón cooperativo que `exit()`.
+fn sys_wait4(frame: &SyscallFrame) -> u64 {
+    const WNOHANG: u64 = 1;
+
     let caller = process::current_pid();
-    if !process::has_children(caller) {
-        return u64::MAX;
+    let wanted = match frame.arg0 as i64 {
+        pid if pid > 0 => Some(pid as u64),
+        _ => None,
+    };
+    let status_ptr = frame.arg1;
+    let options = frame.arg2;
+
+    // Antes de esperar nada: un puntero malo es EFAULT ya, no después de
+    // haber recogido (y perdido) el estado del hijo.
+    if status_ptr != 0 && usercopy::check(status_ptr, 4, true).is_err() {
+        return EFAULT;
     }
+
     loop {
-        if let Some((child_pid, exit_code)) = process::reap_zombie(caller) {
-            if frame.arg0 != 0 {
-                unsafe { *(frame.arg0 as *mut i32) = exit_code };
+        let has_target = match wanted {
+            Some(pid) => process::is_child(caller, pid),
+            None => process::has_children(caller),
+        };
+        if !has_target {
+            return ECHILD;
+        }
+        if let Some((child_pid, status)) = process::reap_zombie(caller, wanted) {
+            if status_ptr != 0 && usercopy::write(status_ptr, status).is_err() {
+                return EFAULT;
             }
             serial_println!(
                 "[syscall] wait: PID {} recogió al hijo PID {} (código {}) — memoria liberada",
                 caller,
                 child_pid,
-                exit_code
+                process::shell_code(status)
             );
             return child_pid;
+        }
+        if options & WNOHANG != 0 {
+            return 0;
         }
         scheduler::yield_now();
     }
@@ -465,7 +536,7 @@ fn sys_kill(frame: &SyscallFrame) -> u64 {
 
     if !signal::deliver_default(target, sig) {
         serial_println!("[syscall] kill: PID {} -> PID {} falló (no existe o ya era zombie)", caller, target);
-        return u64::MAX;
+        return ESRCH;
     }
     serial_println!("[syscall] kill: PID {} mandó señal {} a PID {}", caller, sig, target);
 
@@ -479,28 +550,8 @@ fn sys_kill(frame: &SyscallFrame) -> u64 {
     0
 }
 
-/// Copia una cadena C (terminada en NUL) desde un puntero de usuario —
-/// mismo patrón ya usado en `sys_execve` para el nombre del fichero,
-/// extraído aquí porque `sys_open` lo necesita igual. Los punteros de
-/// usuario se leen directamente (sin copiar a través de ninguna
-/// validación de rango): válido mientras el proceso que llama no sea
-/// hostil — este kernel todavía no se defiende de un proceso de
-/// usuario malicioso que pase punteros fuera de su propio espacio, ver
-/// `docs/TODO.md`.
-fn read_user_cstr(ptr: *const u8, buf: &mut [u8; 64]) -> Result<&str, &'static str> {
-    let mut len = 0usize;
-    unsafe {
-        while len < buf.len() {
-            let b = *ptr.add(len);
-            if b == 0 {
-                break;
-            }
-            buf[len] = b;
-            len += 1;
-        }
-    }
-    core::str::from_utf8(&buf[..len]).map_err(|_| "nombre de fichero no es UTF-8 válido")
-}
+/// Longitud máxima de una ruta que llega de un proceso.
+const MAX_PATH: usize = 255;
 
 /// Busca el primer slot libre (`None`) en `fds`, o añade uno nuevo si
 /// no hay ninguno — el fd resultante es `3 + índice` (0/1/2 son
@@ -516,23 +567,23 @@ fn alloc_fd(fds: &mut Vec<Option<FdEntry>>, entry: FdEntry) -> u64 {
     (fds.len() - 1 + 3) as u64
 }
 
-/// `read(fd, buf, count)` — M8, primer paso POSIX para mlibc. `fd=0`
-/// (stdin) todavía no tiene una fuente real que leer de forma no
-/// bloqueante desde ring 3 (necesitaría integrar el teclado/serie con
-/// el scheduler) — devuelve 0 (EOF) a propósito, limitación conocida,
-/// documentada en `docs/TODO.md`, no un bug silencioso. `fd>=3` sirve
-/// del buffer que `open()` ya cargó entero del VFS.
+/// `read(fd, buf, count)`. `fd=0` (stdin) lee una línea de la terminal
+/// (`sys_read_stdin`); `fd>=3` sirve del buffer que `open()` ya cargó
+/// entero del VFS.
 fn sys_read(frame: &SyscallFrame) -> u64 {
     let fd = frame.arg0;
-    let buf = frame.arg1 as *mut u8;
+    let buf = frame.arg1;
     let count = frame.arg2 as usize;
+    if usercopy::check(buf, count, true).is_err() {
+        return EFAULT;
+    }
 
     if fd == 0 {
         if let Err(v) = caps::enforce_current(caps::CAP_STDIO) {
             serial_println!("[syscall] SYS_READ DENEGADO (stdin) — falta CAP_STDIO (pedido=0x{:x})", v.requested);
             return u64::MAX;
         }
-        return 0; // EOF — ver nota de arriba.
+        return sys_read_stdin(buf, count);
     }
     if fd == 1 || fd == 2 {
         return u64::MAX; // EBADF: stdout/stderr no son legibles.
@@ -550,13 +601,43 @@ fn sys_read(frame: &SyscallFrame) -> u64 {
         };
         let remaining = data.len() - *cursor;
         let n = core::cmp::min(count, remaining);
-        unsafe {
-            core::ptr::copy_nonoverlapping(data[*cursor..].as_ptr(), buf, n);
+        if usercopy::copy_to_user(buf, &data[*cursor..*cursor + n]).is_err() {
+            return EFAULT;
         }
         *cursor += n;
         n as u64
     });
     result.unwrap_or(u64::MAX)
+}
+
+/// `read(0, ...)` — una línea de la terminal (`tty.rs`): bloquea, cediendo
+/// el turno, hasta que se pulse Intro. Ctrl-D es fin de fichero y Ctrl-C
+/// mata al proceso (SIGINT), como en cualquier Unix.
+fn sys_read_stdin(buf: u64, count: usize) -> u64 {
+    if count == 0 {
+        return 0;
+    }
+    let mut line = alloc::vec![0u8; count.min(4096)];
+    loop {
+        match crate::tty::try_read(&mut line) {
+            crate::tty::Read::Data(n) => {
+                return match usercopy::copy_to_user(buf, &line[..n]) {
+                    Ok(()) => n as u64,
+                    Err(_) => EFAULT,
+                };
+            }
+            crate::tty::Read::WouldBlock => scheduler::yield_now(),
+            crate::tty::Read::Interrupted => {
+                // Soltar el buffer a mano: de aquí no se vuelve.
+                drop(line);
+                signal::kill_current(signal::SIGINT);
+                unsafe { core::arch::asm!("sti") };
+                loop {
+                    scheduler::yield_now();
+                }
+            }
+        }
+    }
 }
 
 /// `write(fd, buf, count)` — `fd=1`/`2` van al puerto serie (stdout y
@@ -565,8 +646,10 @@ fn sys_read(frame: &SyscallFrame) -> u64 {
 /// `WriteFile`, que se vuelca de verdad al VFS en `close()`.
 fn sys_write(frame: &SyscallFrame) -> u64 {
     let fd = frame.arg0;
-    let buf = frame.arg1 as *const u8;
     let count = frame.arg2 as usize;
+    let Ok(bytes) = usercopy::slice(frame.arg1, count) else {
+        return EFAULT;
+    };
 
     if fd == 1 || fd == 2 {
         if let Err(v) = caps::enforce_current(caps::CAP_STDIO) {
@@ -574,7 +657,6 @@ fn sys_write(frame: &SyscallFrame) -> u64 {
             return u64::MAX;
         }
         let mut port = SerialPort::init();
-        let bytes = unsafe { core::slice::from_raw_parts(buf, count) };
         for &b in bytes {
             port.write_byte(b);
         }
@@ -594,7 +676,6 @@ fn sys_write(frame: &SyscallFrame) -> u64 {
         let Some(Some(FdEntry::WriteFile { data, .. })) = pcb.fds.get_mut(index) else {
             return u64::MAX;
         };
-        let bytes = unsafe { core::slice::from_raw_parts(buf, count) };
         data.extend_from_slice(bytes);
         count as u64
     });
@@ -668,14 +749,10 @@ fn sys_open(frame: &SyscallFrame) -> u64 {
         return u64::MAX;
     }
 
-    let mut name_buf = [0u8; 64];
-    let name = match read_user_cstr(frame.arg0 as *const u8, &mut name_buf) {
-        Ok(n) => n,
-        Err(e) => {
-            serial_println!("[syscall] open: {}", e);
-            return u64::MAX;
-        }
+    let Ok(name) = usercopy::read_cstr(frame.arg0, MAX_PATH) else {
+        return EFAULT;
     };
+    let name = name.as_str();
 
     let entry = if writing {
         FdEntry::WriteFile { name: String::from(name), data: Vec::new() }
@@ -857,9 +934,10 @@ fn sys_arch_prctl(frame: &SyscallFrame) -> u64 {
         }
         ARCH_GET_FS => {
             let fs = tls::read_fs_base();
-            // Escribe la dirección en el puntero de usuario que pasó `arg1`.
-            unsafe { *(addr as *mut u64) = fs };
-            0
+            match usercopy::write(addr, fs) {
+                Ok(()) => 0,
+                Err(_) => EFAULT,
+            }
         }
         _ => {
             serial_println!("[syscall] arch_prctl: código desconocido 0x{:x}", code);
@@ -918,6 +996,7 @@ fn sys_futex(frame: &SyscallFrame) -> u64 {
 /// sysdeps Linux. 144 bytes, `repr(C)` obligatorio para que el proceso de
 /// usuario lea los campos en las posiciones que espera.
 #[repr(C)]
+#[derive(Clone, Copy)]
 struct Stat {
     st_dev:        u64,      // 0
     st_ino:        u64,      // 8
@@ -948,10 +1027,9 @@ struct Stat {
 /// fd >= 3  → S_IFREG, size = bytes acumulados en el FdEntry.
 fn sys_fstat(frame: &SyscallFrame) -> u64 {
     let fd = frame.arg0;
-    let stat_ptr = frame.arg1 as *mut Stat;
-
-    if stat_ptr.is_null() {
-        return EINVAL;
+    let stat_ptr = frame.arg1;
+    if usercopy::check(stat_ptr, core::mem::size_of::<Stat>(), true).is_err() {
+        return EFAULT;
     }
 
     let (mode, size): (u32, i64) = match fd {
@@ -991,105 +1069,132 @@ fn sys_fstat(frame: &SyscallFrame) -> u64 {
         st_ctime_nsec: 0,
         __unused: [0; 3],
     };
-    unsafe { stat_ptr.write(stat) };
-    serial_println!("[syscall] fstat: fd={} mode=0o{:o} size={}", fd, mode, size);
-    0
+    match usercopy::write(stat_ptr, stat) {
+        Ok(()) => 0,
+        Err(_) => EFAULT,
+    }
 }
 
-/// `execve()` — reemplaza el proceso actual por un binario nuevo.
-/// `arg0` = puntero (en el espacio de direcciones YA activo del
-/// proceso llamante) a una cadena con el nombre del fichero en el VFS.
-/// Diverge a propósito en el camino de éxito: llama a `enter_ring3`
-/// directamente desde aquí en vez de volver a `syscall_dispatch` — la
-/// pila de kernel de esta syscall queda abandonada (se reutiliza en la
-/// siguiente syscall, `SYSCALL_STACK_TOP` es fijo), y `sysretq` del
-/// handler naked nunca se ejecuta para esta invocación.
-fn sys_execve(frame: &SyscallFrame) -> u64 {
-    let mut name_buf = [0u8; 64];
-    let name = match read_user_cstr(frame.arg0 as *const u8, &mut name_buf) {
-        Ok(n) => n,
-        Err(e) => {
-            serial_println!("[syscall] execve: {}", e);
-            return u64::MAX;
-        }
-    };
+/// Lo que `sys_execve` necesita para saltar al programa nuevo — solo
+/// valores `Copy`: la función no vuelve, así que no puede quedarse con
+/// nada que haya que liberar.
+struct ExecImage {
+    entry_point: u64,
+    user_stack_top: u64,
+    page_table: u64,
+}
 
-    let bytes = match vfs::read(name) {
+/// Primera mitad de `execve()`: todo lo que puede fallar. Lee la ruta y
+/// `argv` del proceso llamante, localiza el binario, lo carga en un
+/// espacio de direcciones nuevo y le monta la pila. Si algo falla
+/// devuelve el errno y el proceso llamante sigue intacto.
+///
+/// El binario se busca primero en el VFS en memoria (donde viven los de
+/// prueba del kernel, por nombre) y, si la ruta es absoluta, en el ext2
+/// del disco (`/bin/...`).
+fn prepare_exec(frame: &SyscallFrame) -> Result<ExecImage, u64> {
+    let path = usercopy::read_cstr(frame.arg0, MAX_PATH).map_err(|_| EFAULT)?;
+
+    // `argv`: vector de punteros terminado en NULL. Un `argv` NULL (lo
+    // que pasan los binarios de prueba en ensamblador) equivale a
+    // `{ path, NULL }`.
+    let mut args: Vec<String> = Vec::new();
+    let argv_ptr = frame.arg1;
+    if argv_ptr != 0 {
+        loop {
+            let slot = argv_ptr + (args.len() as u64) * 8;
+            let arg_ptr: u64 = usercopy::read(slot).map_err(|_| EFAULT)?;
+            if arg_ptr == 0 {
+                break;
+            }
+            if args.len() == process::MAX_ARGS {
+                return Err(E2BIG);
+            }
+            args.push(usercopy::read_cstr(arg_ptr, 4096).map_err(|_| EFAULT)?);
+        }
+    }
+    if args.is_empty() {
+        args.push(path.clone());
+    }
+    let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
+
+    let bytes = match vfs::read(&path) {
         Some(b) => b,
+        None if path.starts_with('/') => crate::ext2::read_file(&path).map_err(|e| {
+            serial_println!("[syscall] execve: '{}': {}", path, e);
+            ENOENT
+        })?,
         None => {
-            serial_println!("[syscall] execve: '{}' no existe en el VFS", name);
-            return u64::MAX;
+            serial_println!("[syscall] execve: '{}' no existe en el VFS", path);
+            return Err(ENOENT);
         }
     };
 
-    let loaded = match elf::load(&bytes) {
-        Ok(l) => l,
-        Err(e) => {
-            serial_println!("[syscall] execve: carga de ELF falló: {}", e);
-            return u64::MAX;
-        }
-    };
-    // Esta función no vuelve nunca si todo va bien (`enter_ring3` al
-    // final), así que nada de lo que siga vivo aquí llega a soltarse solo:
-    // la copia del fichero hay que devolverla a mano.
-    drop(bytes);
+    let loaded = elf::load(&bytes).map_err(|e| {
+        serial_println!("[syscall] execve: '{}': carga de ELF falló: {}", path, e);
+        ENOEXEC
+    })?;
 
-    // 768 GiB, índice P4 = 1 — genuinamente privado del nuevo espacio.
-    // Antes vivía en 448 GiB (P4 = 0, POR DEBAJO del límite de 512 GiB
-    // documentado en elf.rs): parecía funcionar porque hasta ahora
-    // ningún binario había llamado a `execve()` dos veces en el mismo
-    // arranque. Lo encontró `ember` (m7-ember): la primera llamada dejó
-    // la página mapeada para siempre en el P4[0] COMPARTIDO por todo el
-    // kernel (`free_address_space` nunca toca P4[0], a propósito), y la
-    // segunda llamada chocaba contra esa misma dirección ya ocupada.
+    // 768 GiB, índice P4 = 1 — privado del espacio nuevo (ver `elf.rs`
+    // sobre por qué nada de un proceso puede vivir por debajo de 512 GiB).
     let user_stack_virt: u64 = 0x0000_00C0_0000_0000;
-    // `map_fresh_user_stack` (M8b) también deja escrito el frame
-    // inicial que un `crt0` real esperaría (`argc`/`argv`/`envp`/
-    // `auxv`, ver su comentario en `process.rs`) — antes esta función
-    // mapeaba la página a mano y usaba `user_stack_virt + 4096` tal
-    // cual como RSP; ahora comparte el mismo camino que `spawn_elf`.
-    // `argv` del programa nuevo: de momento solo su propio nombre — el
-    // puntero `argv` que pasa el llamante (`arg1`) aún no se lee, falta
-    // un acceso validado a memoria de usuario (ver docs/TODO.md).
-    let user_stack_top = match unsafe {
-        process::map_fresh_user_stack(loaded.page_table, user_stack_virt, loaded.entry_point, &[name])
-    } {
-        Ok(top) => top,
-        Err(e) => {
-            serial_println!("[syscall] execve: fallo mapeando la pila de usuario: {}", e);
-            unsafe { mmu::free_address_space(loaded.page_table) };
-            return u64::MAX;
-        }
+    let user_stack_top = unsafe {
+        process::map_fresh_user_stack(loaded.page_table, user_stack_virt, loaded.entry_point, &arg_refs)
+    }
+    .map_err(|e| {
+        serial_println!("[syscall] execve: '{}': {}", path, e);
+        unsafe { mmu::free_address_space(loaded.page_table) };
+        E2BIG
+    })?;
+
+    serial_println!(
+        "[syscall] execve: PID {} -> '{}' cargado, entry=0x{:x} (espacio de direcciones reemplazado)",
+        process::current_pid(),
+        path,
+        loaded.entry_point
+    );
+
+    Ok(ExecImage {
+        entry_point: loaded.entry_point,
+        user_stack_top,
+        page_table: loaded.page_table,
+    })
+}
+
+/// `execve(path, argv, envp)` — reemplaza el proceso actual por un
+/// binario nuevo. `envp` se ignora todavía (el programa nuevo arranca
+/// sin variables de entorno). Los descriptores abiertos se conservan.
+///
+/// Diverge en el camino de éxito: salta a ring 3 directamente desde aquí
+/// en vez de volver a `syscall_dispatch` — la pila de kernel de esta
+/// syscall queda abandonada (se reutiliza en la siguiente).
+fn sys_execve(frame: &SyscallFrame) -> u64 {
+    let image = match prepare_exec(frame) {
+        Ok(image) => image,
+        Err(errno) => return errno,
     };
 
     let pid = process::current_pid();
     let old_page_table = process::find(pid).map(|p| p.page_table);
-    process::set_page_table(pid, loaded.page_table);
+    process::set_page_table(pid, image.page_table);
     process::reset_for_exec(pid);
     // También en el scheduler, no solo en el PCB — ver el comentario
     // largo de `scheduler::set_task_page_table` sobre el bug real que
     // esto arregla (CR3 revertido al espacio VIEJO si el timer preempta
     // a este proceso en cualquier punto después de este `execve`).
-    scheduler::set_task_page_table(pid, loaded.page_table);
-
-    serial_println!(
-        "[syscall] execve: PID {} -> '{}' cargado, entry=0x{:x} (espacio de direcciones reemplazado)",
-        pid,
-        name,
-        loaded.entry_point
-    );
+    scheduler::set_task_page_table(pid, image.page_table);
 
     unsafe {
-        mmu::switch_address_space(loaded.page_table);
+        mmu::switch_address_space(image.page_table);
         tls::write_fs_base(0);
+        tls::fpu_init(); // el programa nuevo no hereda el estado FPU del anterior
         // El espacio anterior ya no lo usa nadie (CR3 acaba de cambiar):
-        // devolver su memoria. Antes se perdía entera en cada `execve()`.
-        // `name` vive en la pila de kernel, no en ese espacio.
+        // devolver su memoria.
         if let Some(old) = old_page_table {
-            if old != loaded.page_table {
+            if old != image.page_table {
                 mmu::free_address_space(old);
             }
         }
-        ring3::enter_ring3(loaded.entry_point, user_stack_top);
+        ring3::enter_ring3(image.entry_point, image.user_stack_top);
     }
 }

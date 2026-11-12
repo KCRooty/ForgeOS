@@ -176,6 +176,26 @@ pub fn set_task_page_table(pid: u64, page_table: u64) -> bool {
     }
 }
 
+/// Fija el estado FPU/SSE con el que la tarea del proceso `pid` recibirá
+/// su primer turno — para el hijo de `fork()`, que hereda el del padre
+/// en vez de arrancar con uno limpio.
+pub fn set_task_fpu(pid: u64, state: crate::tls::FxState) -> bool {
+    unsafe {
+        let sched = match (*SCHEDULER.0.get()).as_mut() {
+            Some(s) => s,
+            None => return false,
+        };
+        for task in sched.tasks.iter_mut() {
+            if task.pid == pid {
+                task.fxstate = state;
+                task.fpu_saved = true;
+                return true;
+            }
+        }
+        false
+    }
+}
+
 /// Marca como `Finished` la tarea cuyo `Task::pid` coincida —a
 /// diferencia de `mark_current_finished()`, no hace falta que sea la
 /// tarea en ejecución ahora mismo. Para `signal::deliver_default`: matar

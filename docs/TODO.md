@@ -743,12 +743,80 @@ prueba en ensamblador, todos preexistentes:
    antiguo). Reescrito con la fuente en el repo
    (`userland/crt0test.asm`).
 
-**Limitaciones documentadas a propósito:** mlibc se compila solo con la
-parte ANSI C — la opción POSIX (`fork`/`exec`/`stat`/directorios/señales
-desde C) necesita más sysdeps y, en el kernel, lo que se lista abajo.
-`abort()` acaba en pánico de mlibc (código 255) por la misma razón.
-`execve()` sigue sin leer el `argv` de su llamante. `SYS_WRITE` sigue
-siendo 63.
+**Limitaciones de M11** (las tres primeras resueltas en M12, abajo):
+mlibc solo con la parte ANSI C, `abort()` en pánico de mlibc, `execve()`
+sin leer el `argv` de su llamante. `SYS_WRITE` sigue siendo 63.
+
+**Actualización — M12: procesos desde C (`fork`/`exec`/`wait`), stdin
+real y Bellows v0 (verificado en QEMU con 15 arranques en frío de la
+batería completa):** mlibc se compila ya con su parte POSIX, y un
+programa en C puede lanzar otros. La prueba es un shell de verdad
+corriendo en ring 3:
+
+```
+forge> run /bin/bellows
+bellows> hello
+hello, forge! (C + mlibc)
+[codigo 42]
+bellows> crash div0
+bellows: crash terminado por SIGFPE
+[codigo 136]
+bellows> exit
+```
+
+`userland/c/proctest.c` son 30 comprobaciones más (registros y FPU a
+través de `fork()`, 8 hijos a la vez, `waitpid` por PID / `WNOHANG` /
+`ECHILD`, `kill`, `abort()`, `execv` con `argv`, y punteros inválidos en
+cada syscall), todas en verde.
+
+- **Acceso validado a memoria de usuario (`usercopy.rs`).** Toda
+  syscall comprobaba cero: desreferenciaba en ring 0 el puntero que le
+  dieran. Uno malo colgaba el sistema; uno que apuntara al kernel
+  dejaba a cualquier proceso leerlo (`write(1, direccion_del_kernel,
+  n)`) o escribirlo (`read`). Ahora un rango solo vale si cae por encima
+  de 512 GiB y cada página está mapeada en el espacio del proceso, con
+  permiso de usuario (y de escritura si toca); si no, `EFAULT`.
+- **`fork()` completo.** El hijo arranca con TODOS los registros del
+  padre (`syscall_entry` guarda ahora también los callee-saved), su
+  estado FPU/SSE, su puntero de TLS, sus descriptores y los límites de
+  su heap y de su arena de `mmap()`. Antes solo heredaba
+  `rip`/`rsp`/`rax`: bastaba para los binarios de prueba en
+  ensamblador, pero en C las variables que el compilador deja en
+  `rbx`/`r12`-`r15` llegaban a cero al hijo, y su primer `malloc`
+  intentaba mapear encima de páginas que ya tenía.
+- **`wait4()` con la ABI de Linux** (`pid`, `*status`, `WNOHANG`) y
+  wait status de verdad: `exit(139)` ya no se confunde con morir por
+  SIGSEGV. `execve()` lee el `argv` de su llamante y carga también
+  desde el ext2 (`/bin/...`), no solo del VFS en memoria.
+  `getppid()`, `sched_yield()`.
+- **stdin real (`tty.rs`).** `read(0)` entrega una línea de la terminal
+  (teclado o serie) en modo cocinado: eco y retroceso en el kernel,
+  Ctrl-D = fin de fichero, Ctrl-C = SIGINT al que está leyendo.
+- **Huérfanos.** Al morir un proceso sus hijos pasan a la consola, que
+  los recoge cuando terminan — antes se quedaban apuntando a un PID que
+  ya no existía.
+- **`abort()` funciona** (SIGABRT): `sigaction` acepta la acción por
+  defecto y `kill()` devuelve `ESRCH` si el PID no existe.
+
+Bugs reales que destapó, preexistentes:
+
+1. **Dos `fork()` seguidos se pisaban.** El contexto de arranque del
+   hijo viajaba en un único hueco global ("un fork en vuelo a la vez");
+   si el padre volvía a hacer `fork()` antes de que el primer hijo
+   recibiera turno, el primero arrancaba con el RIP/RSP del segundo.
+   Lo mismo para dos `run ... &` seguidos. Ahora el contexto vive en el
+   PCB de cada proceso (`Pcb::start`).
+2. **`killtest` pasaba por casualidad:** llamaba a `wait()` con el 15
+   de SIGTERM todavía en `rsi`. Con la ABI nueva ese registro es el
+   puntero de status — corregido en el binario.
+
+**Limitaciones documentadas a propósito:** sin manejadores de señal
+propios (`sigaction` con una función devuelve `ENOSYS`); `execve()`
+ignora `envp`; no hay `dup2`, tuberías desde C, `stat()` por ruta ni
+directorios — sus funciones devuelven `ENOSYS`. La terminal no tiene
+"proceso en primer plano": quien llama a `read(0)` se lleva lo
+tecleado. Un proceso que espera (`wait`, `read(0)`) lo hace cediendo el
+turno en bucle, no durmiendo — ver "bloqueo real" en la sección 2.
 
 ---
 
@@ -902,7 +970,7 @@ zip correspondiente. `process.rs` y fork/execve/exit/getpid (milestone
   padre, solo `rip`/`rsp`/`rflags`/`rax` (ver aviso largo en
   `ring3::enter_ring3_with_rax`) — vale para el payload de prueba, no
   para un `fork()` de propósito general todavía.
-- ✅ **`wait()` real (`SYS_WAIT`=61)** *verificado en QEMU* —
+- ✅ **`wait()` real (`SYS_WAIT4`=61; ABI de Linux desde M12)** *verificado en QEMU* —
   bloqueante de verdad (cede el turno en bucle hasta que el hijo sea
   zombie, mismo patrón cooperativo que `exit()`), recoge el PID y
   código de salida (`arg0` = puntero de usuario opcional a `i32`), y
@@ -956,14 +1024,22 @@ zip correspondiente. `process.rs` y fork/execve/exit/getpid (milestone
 - ✅ **`lseek()` (`SYS_LSEEK`=8), `argv` real al arrancar un proceso,
   y excepciones de ring 3 como señales (M11)** *verificado en QEMU* —
   ver actualización M11 arriba.
-- ❌ **Acceso validado a memoria de usuario** (`copy_from_user`/
-  `copy_to_user`) — hoy toda syscall se fía del puntero que le pasan:
-  uno malo es un fallo de página en ring 0, es decir, el kernel entero
-  parado. Bloquea leer `argv`/`envp` en `execve()` y es lo primero que
-  hay que cerrar antes de ejecutar nada que no sea de confianza.
-- ❌ **`fork()` completo** — el hijo solo hereda `rip`/`rsp`/`rflags`/
-  `rax`; un `fork()` desde C necesita todos los registros (y el estado
-  FPU) del padre.
+- ✅ **Acceso validado a memoria de usuario (`usercopy.rs`, M12)**
+  *verificado en QEMU* — ver actualización M12 arriba.
+- ✅ **`fork()` completo, `wait4()` con ABI de Linux, `execve()` con
+  `argv` y desde ext2, `getppid`, `sched_yield` (M12)** *verificado en
+  QEMU* — ver actualización M12 arriba. **Pendiente:** `envp`.
+- ❌ **Bloqueo real en el scheduler** (dormir/despertar) — `wait()`,
+  `read(0)` y la consola esperan cediendo el turno o con `hlt` en su
+  propio turno, no saliendo de la cola. Funciona, pero un proceso que
+  cede el turno pierde lo que quede del tick cada vez que le toca a una
+  tarea que solo espera. Va de la mano de las primitivas de
+  sincronización de la sección 1.
+- ❌ **Manejadores de señal instalables** — máscara de señales por
+  proceso + trampolín `sigreturn`; hoy solo existe la acción por
+  defecto (terminar).
+- ❌ **`dup2`, tuberías como descriptores, `stat()` por ruta,
+  directorios** — lo que Bellows necesita para `|`, `>` y `ls`.
 - ❌ **Paginación bajo demanda / pila que crece** — la pila de usuario
   son 256 KiB fijos mapeados al arrancar.
 
@@ -1062,19 +1138,24 @@ zip correspondiente. `process.rs` y fork/execve/exit/getpid (milestone
   (`process::write_initial_stack_frame`), con `argv` real desde M11
   (`run /bin/prog a b c`). **Pendiente:** variables de entorno (`envp`
   siempre vacío) y que `execve()` lea el `argv` de su llamante.
-- ✅ **libc — mlibc portada, parte ANSI C (M10 + M11)** *verificado en
+- ✅ **libc — mlibc portada, ANSI C + POSIX (M10-M12)** *verificado en
   QEMU* — en vez de escribir la nuestra desde cero: mlibc (libc pensada
   para OSes nuevos, con capa de abstracción por sistema; es lo que usa
   BoredOS). Sysdeps en `userland/mlibc-sysdeps/`, binarios estáticos.
-  Ver `COMPATIBILITY.md` y la actualización M11 arriba. **Pendiente:**
-  la opción POSIX de mlibc (más sysdeps + lo listado en la sección 2),
-  `SYS_CLOCK_GETTIME` (necesita reloj: RTC o timer calibrado, sección
-  1), stdin real (hoy `read(0)` devuelve EOF) y enlazado dinámico
-  (`libc.so` + `ld.so`, que piden `mmap()` de fichero).
+  Ver `COMPATIBILITY.md` y las actualizaciones M11 y M12 arriba.
+  **Pendiente:** los sysdeps POSIX que el kernel aún no sirve (lista en
+  la sección 2), `SYS_CLOCK_GETTIME` y `sleep()` (necesitan reloj: RTC
+  o timer calibrado, sección 1) y enlazado dinámico (`libc.so` +
+  `ld.so`, que piden `mmap()` de fichero).
 - ❌ **~50-60 coreutils** — `ls`, `cat`, `cp`, `mv`, `rm`, `ps`, `top`,
   etc. (referencia directa: los coreutils de nyxos-dev)
-- ❌ **Bellows** (el shell real, M4+) — pipelines, redirección, job
-  control, `&&`/`||`/`;`, quoting, sustitución de comandos
+- ❌ **Bellows** (el shell real) — **v0 hecho (M12)**,
+  `userland/c/bellows.c`: lee una línea, la parte en palabras y ejecuta
+  con `fork()`+`execv()`+`waitpid()`; órdenes internas `help`/`pid`/
+  `exit`. **Falta todo lo demás:** pipelines, redirección, job control,
+  `&&`/`||`/`;`, quoting, sustitución de comandos, variables, `cd`
+  (no hay directorio de trabajo), y ser lo que arranca Ember en vez de
+  la consola de depuración del kernel.
 - ❌ **Gestor de paquetes** (`forge get`/`forge rm`) — modelo ports+pkg
   de FreeBSD ya decidido, ver `ROADMAP.md`
 - ❌ **`dlopen`/`dlsym`** — enlazado dinámico, si se quiere en algún

@@ -21,7 +21,21 @@ struct ForgeOSSysdepTags :
     FutexWait,
     FutexWake,
     ClockGet,
-    Isatty
+    Isatty,
+    // Opción POSIX (M12)
+    Fork,
+    Execve,
+    Waitpid,
+    Yield,
+    GetPid,
+    GetPpid,
+    GetTid,
+    Kill,
+    Sigaction,
+    Sigprocmask,
+    Stat,
+    Dup2,
+    Recvfrom
 {};
 
 template<typename Tag>
